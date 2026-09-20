@@ -1,8 +1,6 @@
 //! Ephemeral filesystem inode diffing engine.
 
 use std::collections::HashMap;
-use std::ffi::CString;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use crate::delta::types::FsMutation;
 use crate::error::DeltaError;
@@ -122,23 +120,15 @@ fn traverse_dir(
     Ok(())
 }
 
-/// Retrieve inode metadata using raw libc statx or stat.
+/// Retrieve inode metadata using standard library MetadataExt.
 fn stat_path(path: &Path) -> Result<InodeRecord, DeltaError> {
-    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|e| {
-        DeltaError::FsDiffError(format!("Invalid path conversion {}: {e}", path.display()))
-    })?;
-
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let res = unsafe { libc::lstat(c_path.as_ptr(), &mut st) };
-    if res != 0 {
-        return Err(DeltaError::IoError(std::io::Error::last_os_error()));
-    }
-
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(path)?;
     Ok(InodeRecord {
-        ino: st.st_ino,
-        mode: st.st_mode,
-        size: st.st_size as u64,
-        mtime_sec: st.st_mtime,
-        mtime_nsec: st.st_mtime_nsec as u32,
+        ino: meta.ino(),
+        mode: meta.mode(),
+        size: meta.size(),
+        mtime_sec: meta.mtime(),
+        mtime_nsec: meta.mtime_nsec() as u32,
     })
 }

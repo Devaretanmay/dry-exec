@@ -2,7 +2,6 @@
 
 use std::fs::File;
 use std::os::unix::fs::FileExt;
-use byteorder::{ByteOrder, LittleEndian};
 use crate::delta::memory::{read_process_memory, PAGE_SIZE};
 use crate::delta::types::{ByteDelta, PageMutation};
 use crate::error::DeltaError;
@@ -42,7 +41,11 @@ pub fn scan_dirty_pages(
 
     for page_idx in 0..num_pages {
         let entry_offset = page_idx * PAGEMAP_ENTRY_SIZE;
-        let entry = LittleEndian::read_u64(&descriptors[entry_offset..entry_offset + 8]);
+        let entry = u64::from_le_bytes(
+            descriptors[entry_offset..entry_offset + 8]
+                .try_into()
+                .unwrap(),
+        );
 
         // Explicitly check Bit 63 (PAGE_PRESENT) before Bit 55 (PAGE_SOFT_DIRTY)
         let is_present = (entry & PAGE_PRESENT_BIT) != 0;

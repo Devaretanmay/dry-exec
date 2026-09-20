@@ -56,7 +56,7 @@ pub struct InterceptedRequest {
 }
 
 /// Complete deterministic state delta computed post-execution.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StateDelta {
     /// Memory mutations categorized by page.
     pub memory_mutations: Vec<PageMutation>,
@@ -72,12 +72,6 @@ pub struct StateDelta {
 
 impl StateDelta {
     pub fn empty() -> Self {
-        Self {
-            memory_mutations: Vec::new(),
-            fs_mutations: Vec::new(),
-            network_mutations: Vec::new(),
-            total_bytes_mutated: 0,
-            duration_nanos: 0,
-        }
+        Self::default()
     }
 }

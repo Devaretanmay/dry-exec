@@ -19,8 +19,6 @@ use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 #[cfg(target_os = "linux")]
 use pyo3::types::{PyBytes, PyDict, PyList};
-#[cfg(target_os = "linux")]
-use serde::Deserialize;
 
 #[cfg(target_os = "linux")]
 create_exception!(_dry_exec_ffi, IsolationSetupError, PyException);
@@ -30,25 +28,15 @@ create_exception!(_dry_exec_ffi, SyscallBoundaryError, PyException);
 create_exception!(_dry_exec_ffi, StateDeltaComputationError, PyException);
 
 #[cfg(target_os = "linux")]
-#[derive(Debug, Deserialize)]
-struct MockEndpointDto {
-    method: String,
-    path: String,
-    status_code: u16,
-    headers: HashMap<String, String>,
-    body: String,
-}
-
-#[cfg(target_os = "linux")]
 #[pyfunction]
-#[pyo3(signature = (action_json, memory_size, tmpfs_path, trigger_blocked_syscall, mock_endpoints_json=None, request_to_trigger=None))]
+#[pyo3(signature = (action_json, memory_size, tmpfs_path, trigger_blocked_syscall, mock_endpoints=None, request_to_trigger=None))]
 fn execute_isolated_action(
     py: Python<'_>,
     action_json: String,
     memory_size: usize,
     tmpfs_path: String,
     trigger_blocked_syscall: bool,
-    mock_endpoints_json: Option<String>,
+    mock_endpoints: Option<Vec<(String, String, u16, HashMap<String, String>, Vec<u8>)>>,
     request_to_trigger: Option<(String, String, String)>,
 ) -> PyResult<PyObject> {
     use dry_exec_core::delta::{
@@ -85,20 +73,18 @@ fn execute_isolated_action(
         }
 
         // Configure transparent network proxy with schema-driven endpoints
-        let proxy_port = if let Some(ref json_str) = mock_endpoints_json {
+        let proxy_port = if let Some(endpoints) = mock_endpoints {
             let mut schema = NetworkMockSchema::new();
-            if let Ok(endpoints) = serde_json::from_str::<Vec<MockEndpointDto>>(json_str) {
-                for ep in endpoints {
-                    schema.register_endpoint(
-                        ep.method,
-                        ep.path,
-                        MockResponse {
-                            status_code: ep.status_code,
-                            headers: ep.headers,
-                            body: ep.body.into_bytes(),
-                        },
-                    );
-                }
+            for (method, path, status_code, headers, body) in endpoints {
+                schema.register_endpoint(
+                    method,
+                    path,
+                    MockResponse {
+                        status_code,
+                        headers,
+                        body,
+                    },
+                );
             }
             Some(
                 coordinator

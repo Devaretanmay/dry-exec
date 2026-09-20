@@ -1,7 +1,6 @@
 """Type-safe async client for the dry-exec ephemeral execution boundary."""
 
 import asyncio
-import json
 from typing import Any, Dict, Optional, Tuple
 from dry_exec.exceptions import (
     IsolationSetupError,
@@ -13,10 +12,10 @@ from dry_exec.models import ByteDelta, FsMutation, InterceptedRequest, PageMutat
 from dry_exec.schemas import Action, Environment
 
 try:
-    import _dry_exec_ffi  # type: ignore
+    from dry_exec import _dry_exec_ffi  # type: ignore
 except ImportError:
     try:
-        from dry_exec import _dry_exec_ffi  # type: ignore
+        import _dry_exec_ffi  # type: ignore
     except ImportError:
         _dry_exec_ffi = None
 
@@ -47,21 +46,21 @@ class DryExecClient:
                 "Ensure execution occurs within the Linux container verification harness."
             )
 
-        # 2. Serialize schema-driven mock endpoints for transparent network proxy
-        mock_endpoints_list = []
-        for route_key, mock_resp in environment.allowed_api_endpoints.items():
-            parts = route_key.strip().split(maxsplit=1)
-            method = parts[0].upper() if len(parts) > 0 else "GET"
-            path = parts[1] if len(parts) > 1 else "/"
-            mock_endpoints_list.append({
-                "method": method,
-                "path": path,
-                "status_code": mock_resp.status_code,
-                "headers": mock_resp.headers,
-                "body": mock_resp.body,
-            })
-
-        mock_endpoints_json = json.dumps(mock_endpoints_list) if mock_endpoints_list else None
+        # 2. Package schema-driven mock endpoints for transparent network proxy
+        mock_endpoints_tuples = None
+        if environment.allowed_api_endpoints:
+            mock_endpoints_tuples = []
+            for route_key, mock_resp in environment.allowed_api_endpoints.items():
+                parts = route_key.strip().split(maxsplit=1)
+                method = parts[0].upper() if len(parts) > 0 else "GET"
+                path = parts[1] if len(parts) > 1 else "/"
+                mock_endpoints_tuples.append((
+                    method,
+                    path,
+                    mock_resp.status_code,
+                    mock_resp.headers,
+                    mock_resp.body.encode("utf-8"),
+                ))
 
         action_payload_json = action.model_dump_json()
         tmpfs_path = (
@@ -78,7 +77,7 @@ class DryExecClient:
                 environment.memory_limit_bytes,
                 tmpfs_path,
                 trigger_blocked_syscall,
-                mock_endpoints_json,
+                mock_endpoints_tuples,
                 request_to_trigger,
             )
         except Exception as exc:

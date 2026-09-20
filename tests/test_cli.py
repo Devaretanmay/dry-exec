@@ -2,6 +2,9 @@
 
 import json
 from pathlib import Path
+import pytest
+
+typer = pytest.importorskip("typer")
 from typer.testing import CliRunner
 from dry_exec.cli import app
 
