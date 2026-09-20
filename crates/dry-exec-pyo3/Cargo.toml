@@ -1,0 +1,17 @@
+[package]
+name = "dry-exec-pyo3"
+version = "0.1.0"
+edition = "2021"
+authors = ["dry-exec systems engineering"]
+description = "High-performance PyO3 FFI bridge for dry-exec ephemeral execution layer"
+
+[lib]
+name = "_dry_exec_ffi"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+dry-exec-core = { path = "../dry-exec-core" }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+libc = "0.2"

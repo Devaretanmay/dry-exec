@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/dry-exec-core",
+    "crates/dry-exec-pyo3",
+]
+resolver = "2"

@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "================================================================="
+echo " Phase 1: Running Rust Core Integration Tests (Loop 1 & Loop 2)..."
+echo "================================================================="
+cargo test --test loop1_loop2_tests -- --nocapture
+
+echo "================================================================="
+echo " Phase 2: Building Python SDK & PyO3 FFI Extension (Loop 3)..."
+echo "================================================================="
+maturin develop
+
+echo "================================================================="
+echo " Phase 3: Running Python SDK Test Suite (Loop 3 Assertions A, B, C)..."
+echo "================================================================="
+pytest -v tests/test_sdk.py

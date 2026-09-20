@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "dry-exec"
+version = "0.1.0"
+description = "Deterministic ephemeral execution primitive and state delta engine"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.maturin]
+manifest-path = "crates/dry-exec-pyo3/Cargo.toml"
+python-source = "python"
+module-name = "dry_exec._dry_exec_ffi"
