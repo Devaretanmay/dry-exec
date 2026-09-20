@@ -33,15 +33,61 @@ Think of it as `git diff` for arbitrary runtime state: memory, filesystem, and n
 
 ---
 
-## Quickstart
+## Which path do I need?
 
-### Install
+- **[Path 1: CLI](#path-1-cli)** — Define environments and actions as YAML/JSON, run from the terminal.
+- **[Path 2: Python Library](#path-2-python-library)** — Import `dry_exec` into your code for programmatic control or agent loops.
+
+---
+
+## Quickstart
 
 ```bash
 pip install dry-exec
 ```
 
-### Run your first ephemeral execution
+<br>
+
+### Path 1: CLI
+
+Define your environment boundary and proposed action as YAML, then run:
+
+**`env.yaml`**
+```yaml
+name: production_db
+allowed_mutation_targets:
+  - users_table
+  - schema_version
+memory_limit_bytes: 67108864
+```
+
+**`action.yaml`**
+```yaml
+action_id: act_migrate_001
+target_resource: users_table
+mutation_type: update
+payload:
+  operation: add_column
+  column: email_verified
+  type: boolean
+```
+
+```bash
+# Dry-run: inspect the state delta before committing
+dry-exec run --config env.yaml --action action.yaml
+
+# Auto-commit without interactive prompt
+dry-exec run --config env.yaml --action action.yaml --commit
+
+# Inspect environment boundary definitions
+dry-exec inspect --config env.yaml
+```
+
+<br>
+
+### Path 2: Python Library
+
+#### Basic: single ephemeral execution
 
 ```python
 import asyncio
@@ -67,20 +113,24 @@ async def main():
 asyncio.run(main())
 ```
 
-### Use the built-in agent loop
+#### Agent loop: propose → dry-run → self-correct → commit
 
 ```python
+import asyncio
 from dry_exec import DryExecAgent, Environment
 
-env = Environment(
-    name="db_migration",
-    allowed_mutation_targets={"users_table", "schema_version"},
-)
+async def main():
+    env = Environment(
+        name="db_migration",
+        allowed_mutation_targets={"users_table", "schema_version"},
+    )
 
-agent = DryExecAgent(environment=env, max_retries=3)
-result = await agent.run("Migrate users table to v2 schema")
+    agent = DryExecAgent(environment=env, max_retries=3)
+    result = await agent.run("Migrate users table to v2 schema")
 
-print(result)  # success=True, trials=2, committed=True
+    print(result)  # success=True, trials=2, committed=True
+
+asyncio.run(main())
 ```
 
 ---
