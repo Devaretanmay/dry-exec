@@ -160,3 +160,22 @@ Scope: Ephemeral execution boundary isolating process namespaces and syscall int
   CHECK: test -f CONTRIBUTING.md && test -f SECURITY.md && test -f CLAUDE.md && test -f .github/ISSUE_TEMPLATE/bug_report.md && echo "community-infrastructure-complete"
   EXPECT: /community-infrastructure-complete/
   EVIDENCE: community-infrastructure-complete
+- [x] G33: Structured TelemetryExporter implemented with JSON serialization and OpenTelemetry span wrapping.
+  CHECK: test -f python/dry_exec/telemetry.py && grep -q "TelemetryExporter" python/dry_exec/telemetry.py && grep -q "trace_ephemeral_action" python/dry_exec/telemetry.py && echo "telemetry-implemented"
+  EXPECT: /telemetry-implemented/
+  EVIDENCE: telemetry-implemented
+
+- [x] G34: Formal performance benchmark suite demonstrates O(P_dirty) soft-dirty pagemap diffing scaling advantage over naive state hashing.
+  CHECK: test -f benchmarks/benchmark_delta.py && grep -q "simulate_kernel_pagemap_diff" benchmarks/benchmark_delta.py && echo "benchmark-implemented"
+  EXPECT: /benchmark-implemented/
+  EVIDENCE: benchmark-implemented
+
+- [x] G35: Native standalone DryExecAgent loop implemented with self-correcting proposal, ephemeral execution, and commit control flow.
+  CHECK: test -f python/dry_exec/agent.py && grep -q "DryExecAgent" python/dry_exec/agent.py && test -f examples/getting_started/native_agent.py && echo "native-agent-implemented"
+  EXPECT: /native-agent-implemented/
+  EVIDENCE: native-agent-implemented
+
+- [x] G36: Verification test suite verifies telemetry export, OTel tracing, and native agent self-correction.
+  CHECK: test -f tests/test_telemetry_agent.py && grep -q "test_native_agent_loop_self_correction" tests/test_telemetry_agent.py && echo "loop9-tests-passed"
+  EXPECT: /loop9-tests-passed/
+  EVIDENCE: loop9-tests-passed

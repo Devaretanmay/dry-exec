@@ -79,3 +79,11 @@ def test_example_langchain_tool():
         payload={"query": "ALTER TABLE test;"},
     )
     assert "Dry-run executed successfully" in receipt
+
+
+@pytest.mark.asyncio
+async def test_example_native_agent():
+    """Verify native agent loop example executes and self-corrects successfully."""
+    from examples.getting_started.native_agent import main as native_agent_main
+    await native_agent_main()
+

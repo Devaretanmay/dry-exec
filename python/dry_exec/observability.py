@@ -9,13 +9,22 @@ from rich.text import Text
 from dry_exec.exceptions import DryExecError, SchemaViolationError, SyscallBoundaryError
 from dry_exec.models import StateDelta
 from dry_exec.schemas import Action, Environment
+from dry_exec.telemetry import TelemetryExporter
 
 
 class DeltaLogger:
     """Terminal visualization logger rendering state deltas and execution telemetry."""
 
-    def __init__(self, console: Optional[Console] = None):
+    def __init__(
+        self,
+        console: Optional[Console] = None,
+        telemetry_exporter: Optional[TelemetryExporter] = None,
+        enable_json_telemetry: bool = False,
+    ):
         self.console = console or Console()
+        self.telemetry = telemetry_exporter or (
+            TelemetryExporter(emit_json_logs=True) if enable_json_telemetry else None
+        )
 
     def render_action_header(self, environment: Environment, action: Action) -> None:
         """Render proposed action and target environment boundary."""
@@ -138,8 +147,15 @@ class DeltaLogger:
                 )
             )
 
+    def render_error(self, error: Exception, trial_id: int = 1) -> None:
+        """Alias for render_violation with optional trial_id for multi-trial loops."""
+        self.render_violation(error)
+
     def render_violation(self, error: Exception) -> None:
         """Render boundary violations with diagnostic telemetry for self-correction."""
+        if self.telemetry is not None:
+            # Emit structured telemetry log
+            self.telemetry.logger.error(f"Execution boundary violation: {error}")
         if isinstance(error, SyscallBoundaryError):
             text = Text()
             text.append("Boundary Interception: Blocked Syscall\n", style="bold red")

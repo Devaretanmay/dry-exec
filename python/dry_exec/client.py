@@ -10,6 +10,7 @@ from dry_exec.exceptions import (
 )
 from dry_exec.models import ByteDelta, FsMutation, InterceptedRequest, PageMutation, StateDelta
 from dry_exec.schemas import Action, Environment
+from dry_exec.telemetry import TelemetryExporter
 
 try:
     from dry_exec import _dry_exec_ffi  # type: ignore
@@ -23,8 +24,13 @@ except ImportError:
 class DryExecClient:
     """High-performance client providing ephemeral execution primitives for autonomous execution loops."""
 
-    def __init__(self, ffi_module: Any = None):
+    def __init__(
+        self,
+        ffi_module: Any = None,
+        telemetry_exporter: Optional[TelemetryExporter] = None,
+    ):
         self._ffi = ffi_module if ffi_module is not None else _dry_exec_ffi
+        self.telemetry = telemetry_exporter or TelemetryExporter()
 
     async def execute_ephemeral_action(
         self,
@@ -37,6 +43,28 @@ class DryExecClient:
         
         Enforces synchronous schema validation before crossing into the FFI execution layer.
         """
+        with self.telemetry.trace_ephemeral_action(environment, action) as span:
+            delta = await self._execute_internal(
+                environment,
+                action,
+                trigger_blocked_syscall=trigger_blocked_syscall,
+                request_to_trigger=request_to_trigger,
+            )
+            if span is not None:
+                span.set_attribute("dry_exec.delta.total_bytes_mutated", delta.total_bytes_mutated)
+                span.set_attribute("dry_exec.delta.duration_nanos", delta.duration_nanos)
+                span.set_attribute("dry_exec.delta.memory_pages", len(delta.memory_mutations))
+                span.set_attribute("dry_exec.delta.fs_mutations", len(delta.fs_mutations))
+                span.set_attribute("dry_exec.delta.network_requests", len(delta.network_mutations))
+            return delta
+
+    async def _execute_internal(
+        self,
+        environment: Environment,
+        action: Action,
+        trigger_blocked_syscall: bool = False,
+        request_to_trigger: Optional[Tuple[str, str, str]] = None,
+    ) -> StateDelta:
         # 1. Synchronous schema validation gatekeeping (pre-execution boundary)
         environment.validate_action(action)
 
