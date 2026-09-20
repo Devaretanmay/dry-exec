@@ -124,6 +124,21 @@ dry-exec/
 *   **Transparent Proxy**: Binds local proxy listener, validates HTTP requests against `allowed_api_endpoints`, and delivers deterministic `MockResponse` payloads with a 500ms timeout bound.
 *   **Network Delta Ledger**: Extends `StateDelta` with `network_mutations`, capturing request method, URL, headers, outbound payload, status code, and mock response body.
 
+### Loop 5: The Developer CLI & Agent Runner
+*   **Command Line Interface**: Provides `dry-exec run`, `dry-exec inspect`, and `dry-exec version`.
+*   **Human-In-The-Loop Control Flow**: Inspects proposed action, executes in isolation, renders delta receipt, and awaits user confirmation before state commitment.
+
+### Loop 6: Observability & Delta Visualization
+*   **DeltaLogger**: Formats state mutations using `rich` terminal panels, clearly segmenting:
+    1. Proposed Action (what the execution loop attempted).
+    2. Memory/Filesystem Mutations (exact byte/file mutations).
+    3. Network Interceptions (outbound requests caught by proxy and mock responses).
+    4. Boundary Violations (`SyscallBoundaryError` and `SchemaViolationError`).
+
+### Loop 7: Production-Ready Example Workflows
+*   [`examples/type_safe_db_migration.py`](examples/type_safe_db_migration.py): Self-correcting database migration workflow recovering from schema boundary rejections.
+*   [`examples/api_payment_exploration.py`](examples/api_payment_exploration.py): External API mutation exploration intercepted by the transparent network proxy with zero network egress.
+
 ---
 
 ## 4. Verification Harness Execution
@@ -135,7 +150,10 @@ dry-exec/
 ./tests/container/run_tests.sh
 ```
 
-The container harness executes three deterministic verification phases:
+The container harness executes five deterministic verification phases:
 1. **Rust Core Primitive Tests**: Validates syscall interception (Assertion A), state delta precision (Assertion B), and $O(P_{\text{dirty}})$ computational bound under $1\,\text{ms}$ (Assertion C).
 2. **PyO3 Extension Compilation**: Builds and links the FFI extension via `maturin develop`.
 3. **Python SDK Test Suite**: Validates synchronous schema rejection (Assertion A), successful ephemeral execution (Assertion B), syscall boundary error telemetry (Assertion C), and transparent proxy mock interception (Assertion D).
+4. **Developer CLI & Observability Tests**: Validates `dry-exec run`, `dry-exec inspect`, and `rich` delta rendering.
+5. **Production-Ready Example Execution**: Executes both example workflows end-to-end within isolated container namespaces.
+

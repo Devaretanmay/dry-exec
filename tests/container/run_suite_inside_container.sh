@@ -12,6 +12,17 @@ echo "================================================================="
 maturin develop
 
 echo "================================================================="
-echo " Phase 3: Running Python SDK Test Suite (Loop 3 Assertions A, B, C)..."
+echo " Phase 3: Running Python SDK Test Suite (Loop 3 Assertions)..."
 echo "================================================================="
 pytest -v tests/test_sdk.py
+
+echo "================================================================="
+echo " Phase 4: Running CLI & Observability Tests (Loops 5 & 6)..."
+echo "================================================================="
+pytest -v tests/test_cli.py
+
+echo "================================================================="
+echo " Phase 5: Running Production-Ready Examples (Loop 7)..."
+echo "================================================================="
+pytest -v tests/test_examples.py
+

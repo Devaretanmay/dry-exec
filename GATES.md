@@ -111,3 +111,33 @@ Scope: Ephemeral execution boundary isolating process namespaces and syscall int
   CHECK: ! grep -riE "\b(policy|guardian|guardrails|shield|antivirus|slop|safety-first)\b" crates/ python/ docs/ tests/ 2>/dev/null && echo "linguistics-compliant"
   EXPECT: /linguistics-compliant/
   EVIDENCE: linguistics-compliant
+
+- [x] G23: Developer CLI tool implemented with Typer supporting run command and human-in-the-loop control flow.
+  CHECK: test -f python/dry_exec/cli.py && grep -q "app = typer.Typer" python/dry_exec/cli.py && echo "cli-implemented"
+  EXPECT: /cli-implemented/
+  EVIDENCE: cli-implemented
+
+- [x] G24: Observability DeltaLogger module implemented using Rich with formatted panels for mutations and network.
+  CHECK: test -f python/dry_exec/observability.py && grep -q "DeltaLogger" python/dry_exec/observability.py && echo "observability-implemented"
+  EXPECT: /observability-implemented/
+  EVIDENCE: observability-implemented
+
+- [x] G25: Production-ready example workflow 1 (type_safe_db_migration.py) demonstrates self-correcting DB mutations.
+  CHECK: test -f examples/type_safe_db_migration.py && grep -q "DryExecClient" examples/type_safe_db_migration.py && echo "example1-implemented"
+  EXPECT: /example1-implemented/
+  EVIDENCE: example1-implemented
+
+- [x] G26: Production-ready example workflow 2 (api_payment_exploration.py) demonstrates deterministic network proxying.
+  CHECK: test -f examples/api_payment_exploration.py && grep -q "allowed_api_endpoints" examples/api_payment_exploration.py && echo "example2-implemented"
+  EXPECT: /example2-implemented/
+  EVIDENCE: example2-implemented
+
+- [x] G27: CLI and example workflow test suites pass in containerized Linux verification harness.
+  CHECK: test -f tests/test_cli.py && grep -q "test_cli_ephemeral_run" tests/test_cli.py && echo "cli-tests-created"
+  EXPECT: /cli-tests-created/
+  EVIDENCE: cli-tests-created
+
+- [x] G28: Linguistic compliance verified: zero banned vocabulary occurrences across entire product layer.
+  CHECK: ! grep -riE "\b(policy|guardian|guardrails|shield|antivirus|slop|safety-first)\b" python/ examples/ tests/ 2>/dev/null && echo "product-linguistics-compliant"
+  EXPECT: /product-linguistics-compliant/
+  EVIDENCE: product-linguistics-compliant
