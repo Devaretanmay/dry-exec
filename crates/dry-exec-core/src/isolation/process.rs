@@ -1,13 +1,13 @@
 //! Ephemeral process execution layer and control plane synchronization boundary.
 
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
-use nix::sys::wait::{waitpid, WaitStatus};
-use nix::unistd::Pid;
 use crate::error::{BoundaryExitStatus, IsolationError};
 use crate::isolation::mount::{mount_ephemeral_tmpfs, set_mount_propagation_private, MountConfig};
 use crate::isolation::namespace::NamespaceFlags;
 use crate::isolation::seccomp::SeccompFilter;
+use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
+use nix::sys::wait::{waitpid, WaitStatus};
+use nix::unistd::Pid;
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 const STACK_SIZE: usize = 2 * 1024 * 1024; // 2MB stack for cloned execution layer
 
@@ -47,7 +47,11 @@ extern "C" fn sigsys_handler(
                     &packet as *const ViolationPacket as *const u8,
                     std::mem::size_of::<ViolationPacket>(),
                 );
-                let _ = libc::write(CHILD_SYNC_FD, bytes.as_ptr() as *const libc::c_void, bytes.len());
+                let _ = libc::write(
+                    CHILD_SYNC_FD,
+                    bytes.as_ptr() as *const libc::c_void,
+                    bytes.len(),
+                );
             }
             libc::_exit(128 + libc::SIGSYS);
         }
@@ -183,23 +187,11 @@ where
 
         // 2. Notify parent control plane: child ready for baseline reset
         let ready_byte: [u8; 1] = [1];
-        let _ = unsafe {
-            libc::write(
-                child_fd,
-                ready_byte.as_ptr() as *const libc::c_void,
-                1,
-            )
-        };
+        let _ = unsafe { libc::write(child_fd, ready_byte.as_ptr() as *const libc::c_void, 1) };
 
         // 3. Await parent acknowledgment (baseline clear completion)
         let mut ack_byte = [0u8; 1];
-        let n = unsafe {
-            libc::read(
-                child_fd,
-                ack_byte.as_mut_ptr() as *mut libc::c_void,
-                1,
-            )
-        };
+        let n = unsafe { libc::read(child_fd, ack_byte.as_mut_ptr() as *mut libc::c_void, 1) };
         if n <= 0 {
             unsafe { libc::_exit(1) };
         }
@@ -216,13 +208,7 @@ where
 
         // 6. Signal completion to parent
         let done_byte: [u8; 1] = [0];
-        let _ = unsafe {
-            libc::write(
-                child_fd,
-                done_byte.as_ptr() as *const libc::c_void,
-                1,
-            )
-        };
+        let _ = unsafe { libc::write(child_fd, done_byte.as_ptr() as *const libc::c_void, 1) };
 
         unsafe { libc::_exit(0) };
     }
@@ -289,10 +275,7 @@ where
     };
     let packet_size = std::mem::size_of::<ViolationPacket>();
     let packet_bytes = unsafe {
-        std::slice::from_raw_parts_mut(
-            &mut packet as *mut ViolationPacket as *mut u8,
-            packet_size,
-        )
+        std::slice::from_raw_parts_mut(&mut packet as *mut ViolationPacket as *mut u8, packet_size)
     };
 
     let n = unsafe {

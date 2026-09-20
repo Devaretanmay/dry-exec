@@ -1,8 +1,8 @@
 //! Ephemeral mount namespace configuration and tmpfs overlay primitives.
 
-use std::path::Path;
-use nix::mount::{mount, MsFlags};
 use crate::error::IsolationError;
+use nix::mount::{mount, MsFlags};
+use std::path::Path;
 
 /// Configuration for isolated mount namespaces.
 #[derive(Debug, Clone)]
@@ -73,9 +73,7 @@ pub fn mount_sterile_proc() -> Result<(), IsolationError> {
             MsFlags::MS_NODEV | MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC,
             None::<&str>,
         )
-        .map_err(|e| {
-            IsolationError::MountFailure(format!("Failed to mount sterile /proc: {e}"))
-        })?;
+        .map_err(|e| IsolationError::MountFailure(format!("Failed to mount sterile /proc: {e}")))?;
     }
     Ok(())
 }

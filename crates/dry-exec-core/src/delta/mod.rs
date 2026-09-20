@@ -12,9 +12,9 @@ pub use network::{MockResponse, NetworkMockSchema, TransparentProxy};
 pub use pagemap::scan_dirty_pages;
 pub use types::{ByteDelta, FsMutation, InterceptedRequest, PageMutation, StateDelta};
 
+use crate::error::DeltaError;
 use std::path::Path;
 use std::time::Instant;
-use crate::error::DeltaError;
 
 /// Coordinator responsible for tracking and computing state deltas across boundaries.
 pub struct DeltaCoordinator {

@@ -1,5 +1,7 @@
 //! Transparent network proxy intercepting outbound requests with schema-driven mock responses.
 
+use crate::delta::types::InterceptedRequest;
+use crate::error::DeltaError;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -7,8 +9,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use crate::delta::types::InterceptedRequest;
-use crate::error::DeltaError;
 
 /// Deterministic mock response defined by the environment schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,9 +70,7 @@ pub struct TransparentProxy {
 impl TransparentProxy {
     /// Start transparent proxy listener on loopback interface with schema-driven mocking.
     pub fn start(schema: NetworkMockSchema) -> Result<Self, DeltaError> {
-        let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| {
-            DeltaError::IoError(e)
-        })?;
+        let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| DeltaError::IoError(e))?;
         let port = listener.local_addr().map_err(DeltaError::IoError)?.port();
 
         let is_running = Arc::new(AtomicBool::new(true));
@@ -209,7 +207,8 @@ fn handle_connection(
     for (k, v) in &response_headers {
         response_bytes.extend_from_slice(format!("{k}: {v}\r\n").as_bytes());
     }
-    response_bytes.extend_from_slice(format!("Content-Length: {}\r\n\r\n", response_body.len()).as_bytes());
+    response_bytes
+        .extend_from_slice(format!("Content-Length: {}\r\n\r\n", response_body.len()).as_bytes());
     response_bytes.extend_from_slice(&response_body);
 
     let _ = stream.write_all(&response_bytes);

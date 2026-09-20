@@ -1,0 +1,40 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python-lint:
+    name: Python Linting (ruff & black)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-python@v5.3.0
+        with:
+          python-version: "3.11"
+      - name: Install Linting Tools
+        run: pip install --no-cache-dir ruff black
+      - name: Check Ruff Formatting and Lint
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: Check Black Formatting
+        run: black --check .
+
+  rust-lint:
+    name: Rust Linting (fmt & clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-unknown-linux-gnu
+      - name: Check Rust Formatting
+        run: cargo fmt --all -- --check
+      - name: Run Clippy
+        run: cargo clippy --workspace --tests --target x86_64-unknown-linux-gnu -- -D warnings

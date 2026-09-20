@@ -2,8 +2,13 @@
 
 import pytest
 import dry_exec.client
-from examples.api_payment_exploration import run_api_payment_exploration
-from examples.type_safe_db_migration import run_self_correcting_db_migration
+
+try:
+    from examples.use_cases.api_payment_exploration import run_api_payment_exploration
+    from examples.use_cases.type_safe_db_migration import run_self_correcting_db_migration
+except ImportError:
+    from examples.api_payment_exploration import run_api_payment_exploration
+    from examples.type_safe_db_migration import run_self_correcting_db_migration
 
 
 @pytest.fixture(autouse=True)
@@ -54,3 +59,23 @@ async def test_example_type_safe_db_migration():
 async def test_example_api_payment_exploration():
     """Verify example workflow 2 executes deterministic network proxy interception."""
     await run_api_payment_exploration()
+
+
+@pytest.mark.asyncio
+async def test_example_quickstart():
+    """Verify getting started quickstart example executes without error."""
+    from examples.getting_started.quickstart import main as quickstart_main
+    await quickstart_main()
+
+
+def test_example_langchain_tool():
+    """Verify LangChain tool wrapper executes within ephemeral boundary."""
+    from examples.integrations.langchain_tool import DryExecLangChainTool
+    tool = DryExecLangChainTool()
+    receipt = tool._run(
+        action_id="act_lc_test",
+        target_resource="database",
+        mutation_type="schema_migration",
+        payload={"query": "ALTER TABLE test;"},
+    )
+    assert "Dry-run executed successfully" in receipt

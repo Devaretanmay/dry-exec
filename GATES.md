@@ -141,3 +141,22 @@ Scope: Ephemeral execution boundary isolating process namespaces and syscall int
   CHECK: ! grep -riE "\b(policy|guardian|guardrails|shield|antivirus|slop|safety-first)\b" python/ examples/ tests/ 2>/dev/null && echo "product-linguistics-compliant"
   EXPECT: /product-linguistics-compliant/
   EVIDENCE: product-linguistics-compliant
+- [x] G29: Professional GitHub workflows implemented for CI, linting, and automated release.
+  CHECK: test -f .github/workflows/ci.yml && test -f .github/workflows/lint.yml && test -f .github/workflows/release.yml && echo "workflows-defined"
+  EXPECT: /workflows-defined/
+  EVIDENCE: workflows-defined
+
+- [x] G30: Developer tooling configured with pre-commit, environment example, and executable build scripts.
+  CHECK: test -f .pre-commit-config.yaml && test -f .env.example && test -x scripts/lint.sh && test -x scripts/build.sh && test -x scripts/test.sh && echo "developer-tooling-configured"
+  EXPECT: /developer-tooling-configured/
+  EVIDENCE: developer-tooling-configured
+
+- [x] G31: Repository restructured with docker directory and modular examples for getting started, use cases, and integrations.
+  CHECK: test -f docker/Dockerfile.ci && test -x docker/build.sh && test -f examples/getting_started/quickstart.py && test -f examples/integrations/langchain_tool.py && echo "repo-restructured"
+  EXPECT: /repo-restructured/
+  EVIDENCE: repo-restructured
+
+- [x] G32: Community and AI-native directives implemented (CONTRIBUTING.md, SECURITY.md, CLAUDE.md).
+  CHECK: test -f CONTRIBUTING.md && test -f SECURITY.md && test -f CLAUDE.md && test -f .github/ISSUE_TEMPLATE/bug_report.md && echo "community-infrastructure-complete"
+  EXPECT: /community-infrastructure-complete/
+  EVIDENCE: community-infrastructure-complete

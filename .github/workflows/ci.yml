@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-core:
+    name: Rust Core Verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2.7.7
+      - name: Cargo Check Workspace
+        run: cargo check --workspace --tests --target x86_64-unknown-linux-gnu
+      - name: Cargo Test (Host-Permitted Units)
+        run: cargo test --lib --workspace
+
+  container-verification-matrix:
+    name: Containerized Kernel Boundary & Python SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Build Container Verification Harness
+        run: docker build -t dry-exec-test-harness -f docker/Dockerfile.ci .
+      - name: Execute Full Ephemeral Verification Suite
+        run: >
+          docker run --rm --privileged
+          --cap-add=SYS_ADMIN
+          --cap-add=SYS_PTRACE
+          dry-exec-test-harness

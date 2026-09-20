@@ -1,9 +1,9 @@
 //! Copy-on-Write (CoW) memory mapping and cross-boundary inspection primitives.
 
+use crate::error::DeltaError;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::ptr::NonNull;
-use crate::error::DeltaError;
 
 pub const PAGE_SIZE: usize = 4096;
 
@@ -22,7 +22,9 @@ impl AnonymousMemoryRegion {
     /// Allocate an anonymous memory region mapped with MAP_PRIVATE.
     pub fn allocate(len: usize) -> Result<Self, DeltaError> {
         if len == 0 {
-            return Err(DeltaError::MmapFailure("Allocation length must be greater than zero".into()));
+            return Err(DeltaError::MmapFailure(
+                "Allocation length must be greater than zero".into(),
+            ));
         }
 
         // Align length to page size boundary
@@ -47,9 +49,8 @@ impl AnonymousMemoryRegion {
         }
 
         Ok(Self {
-            ptr: NonNull::new(ptr as *mut u8).ok_or_else(|| {
-                DeltaError::MmapFailure("mmap returned NULL pointer".into())
-            })?,
+            ptr: NonNull::new(ptr as *mut u8)
+                .ok_or_else(|| DeltaError::MmapFailure("mmap returned NULL pointer".into()))?,
             len: aligned_len,
         })
     }
@@ -128,13 +129,12 @@ pub fn read_process_memory(
 
     // Fallback: Read directly from /proc/[pid]/mem
     let mem_path = format!("/proc/{pid}/mem");
-    let file = OpenOptions::new()
-        .read(true)
-        .open(&mem_path)
-        .map_err(|e| DeltaError::ProcessMemoryError {
+    let file = OpenOptions::new().read(true).open(&mem_path).map_err(|e| {
+        DeltaError::ProcessMemoryError {
             pid,
             reason: format!("Failed to open {mem_path}: {e}"),
-        })?;
+        }
+    })?;
 
     use std::os::unix::fs::FileExt;
     file.read_exact_at(dest, remote_addr as u64)

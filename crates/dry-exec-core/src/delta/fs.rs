@@ -1,9 +1,9 @@
 //! Ephemeral filesystem inode diffing engine.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use crate::delta::types::FsMutation;
 use crate::error::DeltaError;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 /// Minimal inode metadata snapshot for efficient delta evaluation.
 #[derive(Debug, Clone, PartialEq, Eq)]

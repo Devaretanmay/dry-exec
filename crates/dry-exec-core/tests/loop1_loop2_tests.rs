@@ -1,11 +1,11 @@
 //! Containerized verification suite for Loop 1 and Loop 2 primitives.
 
-use std::time::Instant;
 use dry_exec_core::delta::{scan_dirty_pages, AnonymousMemoryRegion, DeltaCoordinator};
 use dry_exec_core::error::BoundaryExitStatus;
 use dry_exec_core::isolation::{
     execute_isolated_process, ProcessBoundaryConfig, SeccompFilter, SyscallAction,
 };
+use std::time::Instant;
 
 #[test]
 fn test_assertion_a_syscall_isolation_interception() {
@@ -32,7 +32,10 @@ fn test_assertion_a_syscall_isolation_interception() {
                 syscall_nr
             );
         }
-        other => panic!("Expected BoundaryExitStatus::SyscallViolation, observed {:?}", other),
+        other => panic!(
+            "Expected BoundaryExitStatus::SyscallViolation, observed {:?}",
+            other
+        ),
     }
 }
 
@@ -86,7 +89,8 @@ fn test_assertion_b_state_delta_precision() {
 
         // Ephemeral filesystem mutation: create one file in tmpfs overlay
         let file_path = temp_dir.path().join("mutated_state.bin");
-        std::fs::write(file_path, b"ephemeral_state_delta").expect("Failed to write ephemeral file");
+        std::fs::write(file_path, b"ephemeral_state_delta")
+            .expect("Failed to write ephemeral file");
     })
     .expect("Process boundary execution failed");
 

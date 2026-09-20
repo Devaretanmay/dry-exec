@@ -1,10 +1,10 @@
 //! Kernel page-table tracking parser utilizing /proc/[pid]/pagemap and soft-dirty flags.
 
-use std::fs::File;
-use std::os::unix::fs::FileExt;
 use crate::delta::memory::{read_process_memory, PAGE_SIZE};
 use crate::delta::types::{ByteDelta, PageMutation};
 use crate::error::DeltaError;
+use std::fs::File;
+use std::os::unix::fs::FileExt;
 
 const PAGEMAP_ENTRY_SIZE: usize = 8;
 const PAGE_PRESENT_BIT: u64 = 1 << 63;

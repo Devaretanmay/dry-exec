@@ -1,8 +1,8 @@
 //! Linux namespace isolation primitives.
 
+use crate::error::IsolationError;
 use bitflags::bitflags;
 use nix::sched::{unshare, CloneFlags};
-use crate::error::IsolationError;
 
 bitflags! {
     /// Linux namespace isolation boundary flags.

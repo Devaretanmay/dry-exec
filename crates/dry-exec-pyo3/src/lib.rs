@@ -6,12 +6,6 @@ compile_error!(
 );
 
 #[cfg(target_os = "linux")]
-use std::collections::HashMap;
-#[cfg(target_os = "linux")]
-use std::io::{Read, Write};
-#[cfg(target_os = "linux")]
-use std::net::TcpStream;
-#[cfg(target_os = "linux")]
 use pyo3::create_exception;
 #[cfg(target_os = "linux")]
 use pyo3::exceptions::PyException;
@@ -19,6 +13,12 @@ use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 #[cfg(target_os = "linux")]
 use pyo3::types::{PyBytes, PyDict, PyList};
+#[cfg(target_os = "linux")]
+use std::collections::HashMap;
+#[cfg(target_os = "linux")]
+use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
+use std::net::TcpStream;
 
 #[cfg(target_os = "linux")]
 create_exception!(_dry_exec_ffi, IsolationSetupError, PyException);
@@ -269,7 +269,10 @@ fn execute_isolated_action(
 fn _dry_exec_ffi(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(execute_isolated_action, m)?)?;
     m.add("IsolationSetupError", py.get_type::<IsolationSetupError>())?;
-    m.add("SyscallBoundaryError", py.get_type::<SyscallBoundaryError>())?;
+    m.add(
+        "SyscallBoundaryError",
+        py.get_type::<SyscallBoundaryError>(),
+    )?;
     m.add(
         "StateDeltaComputationError",
         py.get_type::<StateDeltaComputationError>(),

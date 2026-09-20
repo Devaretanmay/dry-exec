@@ -28,20 +28,14 @@ pub struct PageMutation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsMutation {
     /// New inode created in the execution layer.
-    Created {
-        path: PathBuf,
-        mode: u32,
-        size: u64,
-    },
+    Created { path: PathBuf, mode: u32, size: u64 },
     /// Existing inode mutated in the execution layer.
     Modified {
         path: PathBuf,
         deltas: Vec<ByteDelta>,
     },
     /// Inode removed during execution layer lifecycle.
-    Deleted {
-        path: PathBuf,
-    },
+    Deleted { path: PathBuf },
 }
 
 /// Discrete network request intercepted by the transparent proxy boundary.
