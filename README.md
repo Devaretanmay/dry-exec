@@ -59,22 +59,35 @@
 dry-exec/
 ├── Cargo.toml                                # Root Cargo workspace configuration
 ├── pyproject.toml                            # Python package build configuration (Maturin)
-├── GATES.md                                  # Verifiable acceptance ledger (anti-laziness discipline)
+├── GATES.md                                  # Verifiable acceptance ledger (32/32 met)
+├── CONTRIBUTING.md                           # Community contribution guidelines & terminology
+├── SECURITY.md                               # Kernel isolation security & vulnerability model
+├── CLAUDE.md                                 # Directives for autonomous execution loops
+├── .pre-commit-config.yaml                   # Formatting & linting git hooks
+├── .env.example                              # Developer configuration template
+├── .github/
+│   ├── ISSUE_TEMPLATE/                       # Bug report & feature request templates
+│   └── workflows/                            # Pinned-SHA CI, Lint, & Release pipelines
+├── docker/
+│   ├── Dockerfile.ci                         # Containerized Linux verification runtime
+│   └── build.sh                              # Verification container build helper
+├── scripts/
+│   ├── build.sh                              # Unified workspace build script
+│   ├── lint.sh                               # Cargo fmt, check, & linguistic audit script
+│   └── test.sh                               # Test harness & gate check script
 ├── crates/
 │   ├── dry-exec-core/                        # Rust Core Control Plane & Data Plane
 │   │   ├── Cargo.toml
 │   │   ├── src/
-│   │   │   ├── lib.rs                        # Compile-time target guard & re-exports
-│   │   │   ├── error.rs                      # Type-safe boundary & delta error definitions
+│   │   │   ├── lib.rs                        # Target guards & re-exports
+│   │   │   ├── error.rs                      # Boundary & delta error types
 │   │   │   ├── isolation/                    # Loop 1: Kernel Isolation Boundary
-│   │   │   │   ├── mod.rs                    # Isolation module root
-│   │   │   │   ├── namespace.rs              # Linux namespace cloning & unshare primitives
+│   │   │   │   ├── namespace.rs              # Linux namespace isolation primitives
 │   │   │   │   ├── mount.rs                  # Mount namespace, private propagation, tmpfs
 │   │   │   │   ├── seccomp.rs                # Classic BPF (cBPF) filter builder & attachment
 │   │   │   │   └── process.rs                # Clone supervisor, IPC sync, SIGSYS interception
 │   │   │   └── delta/                        # Loop 2 & Loop 4: State Delta Engine
-│   │   │       ├── mod.rs                    # Delta coordinator & full delta aggregation
-│   │   │       ├── types.rs                  # StateDelta, PageMutation, ByteDelta, InterceptedRequest
+│   │   │       ├── types.rs                  # StateDelta, PageMutation, InterceptedRequest
 │   │   │       ├── memory.rs                 # CoW memory mappings & process_vm_readv access
 │   │   │       ├── pagemap.rs                # /proc/[pid]/pagemap soft-dirty bit parser (O(P_dirty))
 │   │   │       ├── fs.rs                     # Ephemeral tmpfs inode diffing engine
@@ -84,16 +97,28 @@ dry-exec/
 │   └── dry-exec-pyo3/                        # Loop 3: High-Performance PyO3 FFI Bridge
 │       ├── Cargo.toml
 │       └── src/
-│           └── lib.rs                        # PyO3 module, GIL release, structured exception mapping
+│           └── lib.rs                        # PyO3 module, GIL release, structured exceptions
 ├── python/
 │   └── dry_exec/                             # Type-Safe Python SDK
 │       ├── __init__.py                       # Package exports
-│       ├── schemas.py                        # Pydantic V2 Action, Environment, MockResponse schemas
-│       ├── models.py                         # StateDelta, PageMutation, InterceptedRequest models
+│       ├── schemas.py                        # Pydantic V2 Action, Environment, MockResponse
+│       ├── models.py                         # StateDelta, PageMutation, InterceptedRequest
 │       ├── exceptions.py                     # SchemaViolationError, SyscallBoundaryError, etc.
+│       ├── observability.py                  # Rich DeltaLogger receipts
+│       ├── cli.py                            # Typer developer CLI
 │       └── client.py                         # Async-first DryExecClient with synchronous gatekeeping
+├── examples/
+│   ├── getting_started/                      # Basic quickstart usage
+│   │   └── quickstart.py
+│   ├── use_cases/                            # Domain workflows
+│   │   ├── type_safe_db_migration.py         # Self-correcting DB schema migration
+│   │   └── api_payment_exploration.py        # Mocked payment API interception
+│   └── integrations/                         # Agent framework integrations
+│       └── langchain_tool.py                 # LangChain tool wrapper
 └── tests/
     ├── test_sdk.py                           # Python SDK integration test suite
+    ├── test_cli.py                           # CLI & observability verification suite
+    ├── test_examples.py                      # Verification across all example workflows
     └── container/                            # Linux Container Verification Harness
         ├── Dockerfile                        # Containerized Linux runtime environment
         ├── run_tests.sh                      # Host execution script
@@ -102,7 +127,40 @@ dry-exec/
 
 ---
 
-## 3. Engineering Milestones (Build Loops)
+## 3. Quickstart
+
+```python
+import asyncio
+from dry_exec import Action, DryExecClient, Environment
+
+async def main():
+    # 1. Define isolated execution boundary
+    env = Environment(
+        name="quickstart_env",
+        allowed_mutation_targets={"system_status"},
+        memory_limit_bytes=4096,
+    )
+
+    # 2. Define proposed mutation action
+    action = Action(
+        action_id="act_001",
+        target_resource="system_status",
+        mutation_type="update",
+        payload={"status": "online"},
+    )
+
+    # 3. Dry-run exploration: inspect exact StateDelta before committing
+    client = DryExecClient()
+    delta = await client.execute_ephemeral_action(env, action)
+    print(f"StateDelta: {delta.total_bytes_mutated} bytes mutated in {delta.duration_nanos} ns.")
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+---
+
+## 4. Engineering Milestones (Build Loops)
 
 ### Loop 1: The Kernel Isolation Primitive
 *   **Process Boundary**: Clones execution into isolated `PID`, `NET`, `MOUNT`, `IPC`, and `UTS` namespaces.
@@ -136,24 +194,32 @@ dry-exec/
     4. Boundary Violations (`SyscallBoundaryError` and `SchemaViolationError`).
 
 ### Loop 7: Production-Ready Example Workflows
-*   [`examples/type_safe_db_migration.py`](examples/type_safe_db_migration.py): Self-correcting database migration workflow recovering from schema boundary rejections.
-*   [`examples/api_payment_exploration.py`](examples/api_payment_exploration.py): External API mutation exploration intercepted by the transparent network proxy with zero network egress.
+*   [`examples/getting_started/quickstart.py`](examples/getting_started/quickstart.py): Minimal 10-line setup.
+*   [`examples/use_cases/type_safe_db_migration.py`](examples/use_cases/type_safe_db_migration.py): Self-correcting database migration workflow recovering from schema boundary rejections.
+*   [`examples/use_cases/api_payment_exploration.py`](examples/use_cases/api_payment_exploration.py): External API mutation exploration intercepted by the transparent network proxy with zero network egress.
+*   [`examples/integrations/langchain_tool.py`](examples/integrations/langchain_tool.py): Autonomous execution loop wrapper for LangChain.
+
+### Loop 8: Production Restructuring & CI/CD
+*   GitHub Actions CI/CD with pinned SHAs (`ci.yml`, `lint.yml`, `release.yml`).
+*   Automated pre-commit hooks (`.pre-commit-config.yaml`) running `ruff`, `black`, `cargo fmt`, and `cargo clippy`.
+*   Developer scripts (`scripts/lint.sh`, `scripts/build.sh`, `scripts/test.sh`) and container automation (`docker/Dockerfile.ci`, `docker/build.sh`).
+*   Formal community governance and disclosure specifications (`CONTRIBUTING.md`, `SECURITY.md`, `CLAUDE.md`).
 
 ---
 
-## 4. Verification Harness Execution
+## 5. Verification Harness Execution
 
 `dry-exec` enforces compile-time target checking: compilation on non-Linux hosts halts immediately with a directive to use the container harness.
 
 ### Running the Containerized Verification Harness
 ```bash
-./tests/container/run_tests.sh
+./scripts/test.sh
 ```
 
-The container harness executes five deterministic verification phases:
-1. **Rust Core Primitive Tests**: Validates syscall interception (Assertion A), state delta precision (Assertion B), and $O(P_{\text{dirty}})$ computational bound under $1\,\text{ms}$ (Assertion C).
-2. **PyO3 Extension Compilation**: Builds and links the FFI extension via `maturin develop`.
-3. **Python SDK Test Suite**: Validates synchronous schema rejection (Assertion A), successful ephemeral execution (Assertion B), syscall boundary error telemetry (Assertion C), and transparent proxy mock interception (Assertion D).
-4. **Developer CLI & Observability Tests**: Validates `dry-exec run`, `dry-exec inspect`, and `rich` delta rendering.
-5. **Production-Ready Example Execution**: Executes both example workflows end-to-end within isolated container namespaces.
+Or via Docker directly:
+```bash
+./docker/build.sh
+docker run --rm --privileged --cap-add=SYS_ADMIN --cap-add=SYS_PTRACE dry-exec-test-harness
+```
+
 
