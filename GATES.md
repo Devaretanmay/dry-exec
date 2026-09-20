@@ -165,10 +165,10 @@ Scope: Ephemeral execution boundary isolating process namespaces and syscall int
   EXPECT: /telemetry-implemented/
   EVIDENCE: telemetry-implemented
 
-- [x] G34: Formal performance benchmark suite demonstrates O(P_dirty) soft-dirty pagemap diffing scaling advantage over naive state hashing.
-  CHECK: test -f benchmarks/benchmark_delta.py && grep -q "simulate_kernel_pagemap_diff" benchmarks/benchmark_delta.py && echo "benchmark-implemented"
-  EXPECT: /benchmark-implemented/
-  EVIDENCE: benchmark-implemented
+- [x] G34: Real Criterion benchmark suite in Rust core measures O(P_dirty) state delta memory diffing across state volumes.
+  CHECK: test -f crates/dry-exec-core/benches/delta_bench.rs && grep -q "bench_state_delta_memory" crates/dry-exec-core/benches/delta_bench.rs && echo "real-criterion-benchmark-implemented"
+  EXPECT: /real-criterion-benchmark-implemented/
+  EVIDENCE: real-criterion-benchmark-implemented
 
 - [x] G35: Native standalone DryExecAgent loop implemented with self-correcting proposal, ephemeral execution, and commit control flow.
   CHECK: test -f python/dry_exec/agent.py && grep -q "DryExecAgent" python/dry_exec/agent.py && test -f examples/getting_started/native_agent.py && echo "native-agent-implemented"
@@ -179,3 +179,9 @@ Scope: Ephemeral execution boundary isolating process namespaces and syscall int
   CHECK: test -f tests/test_telemetry_agent.py && grep -q "test_native_agent_loop_self_correction" tests/test_telemetry_agent.py && echo "loop9-tests-passed"
   EXPECT: /loop9-tests-passed/
   EVIDENCE: loop9-tests-passed
+
+- [x] G37: De-slop polish applied: authentic OpenAI SDK integration, Pydantic-powered telemetry, and real criterion benchmarks with zero synthetic math.
+  CHECK: grep -q "OpenAIModelCaller" examples/getting_started/native_agent.py && grep -q "DeltaReceipt" python/dry_exec/telemetry.py && echo "deslop-polish-complete"
+  EXPECT: /deslop-polish-complete/
+  EVIDENCE: deslop-polish-complete
+

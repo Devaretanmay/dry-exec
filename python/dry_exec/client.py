@@ -1,4 +1,4 @@
-"""Type-safe async client for the dry-exec ephemeral execution boundary."""
+"""Async client for dry-exec ephemeral kernel isolation."""
 
 import asyncio
 from typing import Any, Dict, Optional, Tuple
@@ -22,7 +22,7 @@ except ImportError:
 
 
 class DryExecClient:
-    """High-performance client providing ephemeral execution primitives for autonomous execution loops."""
+    """Client for dry-run execution and state delta tracking."""
 
     def __init__(
         self,
@@ -39,10 +39,8 @@ class DryExecClient:
         trigger_blocked_syscall: bool = False,
         request_to_trigger: Optional[Tuple[str, str, str]] = None,
     ) -> StateDelta:
-        """Executes a proposed state-mutation action within the isolated kernel boundary.
-        
-        Enforces synchronous schema validation before crossing into the FFI execution layer.
-        """
+        """Runs action within ephemeral boundary and returns computed StateDelta."""
+
         with self.telemetry.trace_ephemeral_action(environment, action) as span:
             delta = await self._execute_internal(
                 environment,
