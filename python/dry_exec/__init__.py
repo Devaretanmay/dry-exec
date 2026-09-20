@@ -1,7 +1,6 @@
 """dry-exec: Ephemeral execution primitive for deterministic state exploration."""
 
-from dex.agent import Agent, AgentExecutionResult, DryExecAgent
-from dex import dry_run, run
+from dry_exec.agent import AgentExecutionResult, DryExecAgent
 from dry_exec.client import DryExecClient
 from dry_exec.exceptions import (
     DryExecError,
@@ -39,3 +38,9 @@ __all__ = [
     "StateDeltaComputationError",
 ]
 
+
+def __getattr__(name: str):
+    if name in ("Agent", "dry_run", "run"):
+        import dex
+        return getattr(dex, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -20,6 +20,9 @@ pub enum IsolationError {
     #[error("Process clone or execution layer failure: {0}")]
     ProcessFailure(String),
 
+    #[error("macOS Seatbelt boundary failure: {0}")]
+    SeatbeltFailure(String),
+
     #[error("State delta engine error: {0}")]
     DeltaError(#[from] DeltaError),
 
@@ -41,6 +44,9 @@ pub enum DeltaError {
 
     #[error("Filesystem snapshot or diff failure: {0}")]
     FsDiffError(String),
+
+    #[error("APFS clonefile snapshot failure: {0}")]
+    ClonefileError(String),
 
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),

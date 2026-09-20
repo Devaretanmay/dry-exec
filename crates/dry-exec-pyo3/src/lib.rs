@@ -1,33 +1,22 @@
-//! PyO3 FFI bridge for dry-exec ephemeral execution boundary.
+//! PyO3 FFI bridge for dry-exec / dex ephemeral execution boundary.
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
 compile_error!(
-    "dry-exec requires Linux kernel primitives (namespaces, seccomp-bpf, soft-dirty pagemap). Build and execute tests inside the provided Linux container verification harness."
+    "dry-exec requires Linux kernel primitives (namespaces, seccomp-bpf, soft-dirty pagemap) or macOS kernel primitives (Seatbelt, APFS clonefile)."
 );
 
-#[cfg(target_os = "linux")]
 use pyo3::create_exception;
-#[cfg(target_os = "linux")]
 use pyo3::exceptions::PyException;
-#[cfg(target_os = "linux")]
 use pyo3::prelude::*;
-#[cfg(target_os = "linux")]
 use pyo3::types::{PyBytes, PyDict, PyList};
-#[cfg(target_os = "linux")]
 use std::collections::HashMap;
-#[cfg(target_os = "linux")]
 use std::io::{Read, Write};
-#[cfg(target_os = "linux")]
 use std::net::TcpStream;
 
-#[cfg(target_os = "linux")]
 create_exception!(_dry_exec_ffi, IsolationSetupError, PyException);
-#[cfg(target_os = "linux")]
 create_exception!(_dry_exec_ffi, SyscallBoundaryError, PyException);
-#[cfg(target_os = "linux")]
 create_exception!(_dry_exec_ffi, StateDeltaComputationError, PyException);
 
-#[cfg(target_os = "linux")]
 #[pyfunction]
 #[pyo3(signature = (action_json, memory_size, tmpfs_path, trigger_blocked_syscall, mock_endpoints=None, request_to_trigger=None))]
 fn execute_isolated_action(
@@ -39,18 +28,20 @@ fn execute_isolated_action(
     mock_endpoints: Option<Vec<(String, String, u16, HashMap<String, String>, Vec<u8>)>>,
     request_to_trigger: Option<(String, String, String)>,
 ) -> PyResult<PyObject> {
-    use dry_exec_core::delta::{
-        AnonymousMemoryRegion, DeltaCoordinator, MockResponse, NetworkMockSchema,
-    };
-    use dry_exec_core::error::BoundaryExitStatus;
-    use dry_exec_core::isolation::{
-        execute_isolated_process, MountConfig, ProcessBoundaryConfig, SeccompFilter, SyscallAction,
-    };
+    #[cfg(target_os = "linux")]
+    use dry_exec_core::delta::AnonymousMemoryRegion;
+    use dry_exec_core::delta::{DeltaCoordinator, MockResponse, NetworkMockSchema};
 
-    let _ = action_json;
+    let _ = (action_json, memory_size);
 
-    // Release Python GIL to ensure asyncio event loop remains non-blocking
+    #[cfg(target_os = "linux")]
     let result = py.allow_threads(|| {
+        use dry_exec_core::error::BoundaryExitStatus;
+        use dry_exec_core::isolation::{
+            execute_isolated_process, MountConfig, ProcessBoundaryConfig, SeccompFilter,
+            SyscallAction,
+        };
+
         let mem_region = if memory_size > 0 {
             Some(
                 AnonymousMemoryRegion::allocate(memory_size)
@@ -72,7 +63,6 @@ fn execute_isolated_action(
             return Err(format!("Filesystem baseline snapshot error: {e}"));
         }
 
-        // Configure transparent network proxy with schema-driven endpoints
         let proxy_port = if let Some(endpoints) = mock_endpoints {
             let mut schema = NetworkMockSchema::new();
             for (method, path, status_code, headers, body) in endpoints {
@@ -103,7 +93,6 @@ fn execute_isolated_action(
 
         let mut filter = SeccompFilter::new(SyscallAction::Trap).with_baseline_whitelist();
         if request_to_trigger.is_some() {
-            // When proxy networking is exercised on loopback, whitelist network IO syscalls
             filter = filter
                 .allow(libc::SYS_socket)
                 .allow(libc::SYS_connect)
@@ -116,12 +105,10 @@ fn execute_isolated_action(
 
         let boundary_result = execute_isolated_process(&config, move || {
             if trigger_blocked_syscall {
-                // Trigger blocked socket syscall to verify deterministic interception
                 unsafe {
                     let _ = libc::syscall(libc::SYS_socket, libc::AF_INET, libc::SOCK_STREAM, 0);
                 }
             } else if let Some((method, path, body)) = request_to_trigger {
-                // Exercise isolated outbound network request against transparent proxy
                 if let Some(port) = proxy_port {
                     if let Ok(mut stream) = TcpStream::connect(format!("127.0.0.1:{port}")) {
                         let req = format!(
@@ -134,7 +121,6 @@ fn execute_isolated_action(
                     }
                 }
             } else if raw_ptr > 0 {
-                // Execute standard state-mutation action: modify 4 bytes at offset 0
                 let target = raw_ptr as *mut u8;
                 let payload = [0xDE, 0xAD, 0xBE, 0xEF];
                 unsafe {
@@ -173,6 +159,106 @@ fn execute_isolated_action(
                 Ok(delta)
             }
         }
+    });
+
+    #[cfg(target_os = "macos")]
+    let result = py.allow_threads(|| {
+        use dry_exec_core::isolation::{execute_macos_isolated_process, SeatbeltConfig};
+
+        let mut coordinator = DeltaCoordinator::new();
+        let scratch_dir = std::path::PathBuf::from(if tmpfs_path.is_empty() {
+            "/private/tmp/dex_ephemeral"
+        } else {
+            &tmpfs_path
+        });
+
+        let _ = std::fs::create_dir_all(&scratch_dir);
+
+        let proxy_port = if let Some(endpoints) = mock_endpoints {
+            let mut schema = NetworkMockSchema::new();
+            for (method, path, status_code, headers, body) in endpoints {
+                schema.register_endpoint(
+                    method,
+                    path,
+                    MockResponse {
+                        status_code,
+                        headers,
+                        body,
+                    },
+                );
+            }
+            Some(
+                coordinator
+                    .start_network_proxy(schema)
+                    .map_err(|e| format!("Network proxy initialization error: {e}"))?,
+            )
+        } else {
+            None
+        };
+
+        let seatbelt_config = SeatbeltConfig {
+            allowed_read_paths: vec![
+                std::path::PathBuf::from("/usr"),
+                std::path::PathBuf::from("/System"),
+                std::path::PathBuf::from("/Library"),
+                std::path::PathBuf::from("/opt/homebrew"),
+                std::path::PathBuf::from("/dev"),
+                std::path::PathBuf::from("/etc"),
+                std::path::PathBuf::from("/private/etc"),
+                std::path::PathBuf::from("/private/tmp"),
+            ],
+            allowed_write_paths: vec![scratch_dir.clone()],
+            allow_loopback_network: true,
+            allow_process_exec: true,
+        };
+
+        let boundary_res = execute_macos_isolated_process(&scratch_dir, &seatbelt_config, || {
+            if trigger_blocked_syscall {
+                // Attempt unauthorized write outside ephemeral sandbox to verify Seatbelt EPERM denial
+                let path = std::ffi::CString::new("/etc/dex_blocked_write.tmp").unwrap();
+                let res = unsafe {
+                    libc::open(path.as_ptr(), libc::O_CREAT | libc::O_WRONLY, 0o644)
+                };
+                if res < 0 {
+                    return 126;
+                }
+                return 0;
+            }
+
+            if let Some((method, path, body)) = request_to_trigger {
+                if let Some(port) = proxy_port {
+                    if let Ok(mut stream) = TcpStream::connect(format!("127.0.0.1:{port}")) {
+                        let req = format!(
+                            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.write_all(req.as_bytes());
+                        let mut resp = Vec::new();
+                        let _ = stream.read_to_end(&mut resp);
+                    }
+                }
+            }
+            0
+        });
+
+        let status_code = match boundary_res {
+            Ok(code) => code,
+            Err(e) => return Err(format!("Execution boundary error: {e}")),
+        };
+
+        if trigger_blocked_syscall && status_code == 126 {
+            return Err("SYSCALL_VIOLATION:1:0".to_string());
+        }
+
+        if status_code != 0 && status_code != 126 {
+            return Err(format!("Process exited with status code {status_code}"));
+        }
+
+        let delta = coordinator
+            .compute_macos_delta(None, Some(&scratch_dir))
+            .map_err(|e| format!("Delta computation error: {e}"))?;
+
+        Ok(delta)
     });
 
     match result {
@@ -249,7 +335,7 @@ fn execute_isolated_action(
                 let ip: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
 
                 let py_err = SyscallBoundaryError::new_err(format!(
-                    "Syscall interception boundary breach: syscall {syscall_nr} at instruction pointer {ip:#x}"
+                    "Boundary breach intercepted: code {syscall_nr} at instruction pointer {ip:#x}"
                 ));
                 let value = py_err.value(py);
                 value.setattr("syscall_nr", syscall_nr)?;
@@ -264,7 +350,6 @@ fn execute_isolated_action(
     }
 }
 
-#[cfg(target_os = "linux")]
 #[pymodule]
 fn _dry_exec_ffi(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(execute_isolated_action, m)?)?;

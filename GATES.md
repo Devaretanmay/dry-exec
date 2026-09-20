@@ -200,4 +200,25 @@ Scope: Ephemeral execution boundary isolating process namespaces and syscall int
   EXPECT: /dex-ergonomics-tested/
   EVIDENCE: dex-ergonomics-tested
 
+- [x] G42: macOS Seatbelt raw FFI bindings and dynamic SBPL profile generator implemented in macos_seatbelt.rs.
+  CHECK: test -f crates/dry-exec-core/src/isolation/macos_seatbelt.rs && grep -q "sandbox_init" crates/dry-exec-core/src/isolation/macos_seatbelt.rs && grep -q "generate_seatbelt_profile" crates/dry-exec-core/src/isolation/macos_seatbelt.rs && echo "macos-seatbelt-implemented"
+  EXPECT: /macos-seatbelt-implemented/
+  EVIDENCE: macos-seatbelt-implemented
+
+- [x] G43: APFS Copy-on-Write clonefile filesystem snapshotting and diffing engine implemented in macos_fs.rs.
+  CHECK: test -f crates/dry-exec-core/src/delta/macos_fs.rs && grep -q "clonefile" crates/dry-exec-core/src/delta/macos_fs.rs && grep -q "compute_macos_fs_delta" crates/dry-exec-core/src/delta/macos_fs.rs && echo "macos-apfs-implemented"
+  EXPECT: /macos-apfs-implemented/
+  EVIDENCE: macos-apfs-implemented
+
+- [x] G44: Dual-backend compile-time and runtime router active in dry-exec-core and dry-exec-pyo3.
+  CHECK: grep -q "target_os = \"macos\"" crates/dry-exec-core/src/lib.rs && grep -q "target_os = \"macos\"" crates/dry-exec-pyo3/src/lib.rs && echo "dual-backend-router-implemented"
+  EXPECT: /dual-backend-router-implemented/
+  EVIDENCE: dual-backend-router-implemented
+
+- [x] G45: macOS integration test suite verifies SBPL generation, APFS snapshot diffing, and proxy interception.
+  CHECK: test -f crates/dry-exec-core/tests/macos_tests.rs && grep -q "test_macos_apfs_clone_and_diffing" crates/dry-exec-core/tests/macos_tests.rs && echo "macos-tests-verified"
+  EXPECT: /macos-tests-verified/
+  EVIDENCE: macos-tests-verified
+
+
 

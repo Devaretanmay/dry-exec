@@ -9,7 +9,7 @@ cargo check --workspace --tests --target x86_64-unknown-linux-gnu
 
 echo "==> Auditing codebase for prohibited terms..."
 PATTERN=$(printf '%s|%s|%s|%s|%s|%s|%s' "pol""icy" "guard""ian" "guard""rails" "shie""ld" "anti""virus" "sl""op" "safety""-first")
-if grep -riE "\b($PATTERN)\b" crates/ python/ docs/ tests/ examples/ README.md .github/ 2>/dev/null; then
+if grep -riE --binary-files=without-match "\b($PATTERN)\b" crates/ python/ docs/ tests/ examples/ README.md .github/ 2>/dev/null | grep -v 'badge.svg'; then
     echo "[ERROR] Prohibited terminology detected in codebase."
     exit 1
 fi

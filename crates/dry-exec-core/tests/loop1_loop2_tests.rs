@@ -1,4 +1,5 @@
 //! Containerized verification suite for Loop 1 and Loop 2 primitives.
+#![cfg(target_os = "linux")]
 
 use dry_exec_core::delta::{scan_dirty_pages, AnonymousMemoryRegion, DeltaCoordinator};
 use dry_exec_core::error::BoundaryExitStatus;

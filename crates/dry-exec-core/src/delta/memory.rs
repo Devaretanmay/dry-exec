@@ -1,7 +1,9 @@
 //! Copy-on-Write (CoW) memory mapping and cross-boundary inspection primitives.
 
 use crate::error::DeltaError;
+#[cfg(target_os = "linux")]
 use std::fs::OpenOptions;
+#[cfg(target_os = "linux")]
 use std::io::Write;
 use std::ptr::NonNull;
 
@@ -85,6 +87,7 @@ impl Drop for AnonymousMemoryRegion {
 }
 
 /// Reset kernel page-table soft-dirty bits for target process PID.
+#[cfg(target_os = "linux")]
 pub fn clear_soft_dirty_bits(pid: i32) -> Result<(), DeltaError> {
     let clear_refs_path = format!("/proc/{pid}/clear_refs");
     let mut file = OpenOptions::new()
@@ -97,6 +100,7 @@ pub fn clear_soft_dirty_bits(pid: i32) -> Result<(), DeltaError> {
 }
 
 /// Read virtual memory from target process address space into destination buffer.
+#[cfg(target_os = "linux")]
 pub fn read_process_memory(
     pid: i32,
     remote_addr: usize,

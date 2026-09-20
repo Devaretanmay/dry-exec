@@ -20,6 +20,46 @@ except ImportError:
     except ImportError:
         _dry_exec_ffi = None
 
+if _dry_exec_ffi is None:
+    import importlib.util
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    candidates = list(repo_root.glob("target/**/_dry_exec_ffi*.so")) + list(
+        repo_root.glob("target/wheels/*.whl")
+    )
+    for candidate in candidates:
+        if candidate.suffix == ".whl":
+            import zipfile
+            import tempfile
+
+            try:
+                with zipfile.ZipFile(candidate, "r") as z:
+                    for name in z.namelist():
+                        if name.endswith(".so"):
+                            tmp_so = Path(tempfile.gettempdir()) / Path(name).name
+                            tmp_so.write_bytes(z.read(name))
+                            spec = importlib.util.spec_from_file_location("_dry_exec_ffi", tmp_so)
+                            if spec and spec.loader:
+                                mod = importlib.util.module_from_spec(spec)
+                                spec.loader.exec_module(mod)
+                                _dry_exec_ffi = mod
+                                break
+            except Exception:
+                pass
+            if _dry_exec_ffi is not None:
+                break
+        else:
+            try:
+                spec = importlib.util.spec_from_file_location("_dry_exec_ffi", candidate)
+                if spec and spec.loader:
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    _dry_exec_ffi = mod
+                    break
+            except Exception:
+                pass
+
 
 class DryExecClient:
     """Client for dry-run execution and state delta tracking."""

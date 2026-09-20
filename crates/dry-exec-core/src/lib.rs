@@ -1,26 +1,30 @@
 //! dry-exec: Ephemeral execution boundary primitive and deterministic state delta engine.
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
 compile_error!(
-    "dry-exec requires Linux kernel primitives (namespaces, seccomp-bpf, soft-dirty pagemap). Build and execute tests inside the provided Linux container verification harness."
+    "dry-exec requires Linux kernel primitives (namespaces, seccomp-bpf, soft-dirty pagemap) or macOS kernel primitives (Seatbelt, APFS clonefile)."
 );
 
-#[cfg(target_os = "linux")]
 pub mod delta;
-#[cfg(target_os = "linux")]
 pub mod error;
-#[cfg(target_os = "linux")]
 pub mod isolation;
 
-#[cfg(target_os = "linux")]
 pub use delta::{
     AnonymousMemoryRegion, ByteDelta, DeltaCoordinator, FsMutation, InterceptedRequest,
     MockResponse, NetworkMockSchema, PageMutation, StateDelta, TransparentProxy,
 };
-#[cfg(target_os = "linux")]
 pub use error::{BoundaryExitStatus, DeltaError, IsolationError};
+
 #[cfg(target_os = "linux")]
 pub use isolation::{
     execute_isolated_process, MountConfig, NamespaceFlags, ProcessBoundaryConfig, SeccompFilter,
     SyscallAction,
+};
+
+#[cfg(target_os = "macos")]
+pub use delta::{apfs_clone_directory, compute_macos_fs_delta};
+#[cfg(target_os = "macos")]
+pub use isolation::{
+    apply_seatbelt_profile, execute_macos_isolated_process, generate_seatbelt_profile,
+    SeatbeltConfig,
 };

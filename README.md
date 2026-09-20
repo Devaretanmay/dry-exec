@@ -9,7 +9,7 @@ Explore state mutations without consequences. Commit only what you approve.
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
-[![Platform](https://img.shields.io/badge/Platform-Linux-green.svg)](#verification)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-green.svg)](#architecture)
 [![CI](https://github.com/Devaretanmay/dry-exec/actions/workflows/ci.yml/badge.svg)](https://github.com/Devaretanmay/dry-exec/actions/workflows/ci.yml)
 
 </div>
@@ -18,7 +18,7 @@ Explore state mutations without consequences. Commit only what you approve.
 
 ## What is dex?
 
-`dex` is a **deterministic state exploration primitive** for autonomous execution loops. It intercepts proposed mutations, runs them inside ephemeral Linux kernel namespaces, and returns the exact byte-level state delta — without ever touching your real environment.
+`dex` is a **deterministic state exploration primitive** for autonomous execution loops. It intercepts proposed mutations, runs them inside ephemeral kernel sandboxes, and returns the exact state delta — without ever touching your real environment.
 
 Think of it as `git diff` for arbitrary runtime state: memory, filesystem, and network — computed at the kernel level.
 
@@ -26,10 +26,11 @@ Think of it as `git diff` for arbitrary runtime state: memory, filesystem, and n
 
 | Problem | dex |
 |---|---|
-| Autonomous loops mutate state blindly | Every mutation runs in an isolated namespace first |
+| Autonomous loops mutate state blindly | Every mutation runs in an isolated kernel sandbox first |
 | Rollback is expensive and error-prone | Nothing to roll back — baseline is never touched |
-| State diffing requires app-level hashing | Kernel soft-dirty pagemap tracking: $O(P_{\text{dirty}})$ |
+| State diffing requires app-level hashing | Kernel soft-dirty pagemap tracking & APFS CoW: $O(P_{\text{dirty}})$ |
 | Network calls leak to production | Transparent proxy returns deterministic mock responses |
+| Requires Docker on developer laptops | **Zero Docker needed** — native on both Linux and macOS |
 
 ---
 
@@ -45,7 +46,7 @@ pip install dry-exec
 
 ### Path 1: The `dex` CLI (Direct Command Execution)
 
-Run any command in an ephemeral sandbox. No YAML required:
+Run any command in an ephemeral sandbox. No YAML or Docker required:
 
 ```bash
 # Dry-run: inspect the state delta without modifying host
@@ -103,7 +104,23 @@ asyncio.run(main())
 
 ---
 
-## How it works
+## Architecture: Dual-Backend Engine
+
+`dex` features a **native dual-backend architecture**. It automatically detects the host operating system and compiles to native kernel primitives with sub-millisecond execution latencies:
+
+```
+                              dex Architecture
+                                     │
+           ┌─────────────────────────┴─────────────────────────┐
+           ▼                                                   ▼
+     Linux Backend                                       macOS Backend
+  (Production & Cloud)                                (Local Development)
+─────────────────────────                           ─────────────────────────
+• Linux Namespaces (PID, NET, MNT)                  • Apple Seatbelt (sandbox_init)
+• seccomp-BPF TRAP filter                           • APFS Copy-on-Write (clonefile)
+• /proc/[pid]/pagemap soft-dirty                    • Transparent Loopback Proxy
+• Zero Docker needed                                • Zero Docker needed
+```
 
 ```
  Autonomous Execution Loop (Python SDK)
@@ -114,21 +131,12 @@ asyncio.run(main())
  └──────────────┬───────────────────────────┘
                 │ PyO3 FFI
                 ▼
- Rust Control Plane
+ Rust Control Plane (Linux & macOS Router)
  ┌──────────────────────────────────────────┐
- │  CoW memory mapping (mmap MAP_PRIVATE)   │
- │  /proc/[pid]/clear_refs baseline         │
+ │  Linux: Namespaces + seccomp + pagemap   │
+ │  macOS: Seatbelt MAC + APFS CoW clone    │
  │  Transparent proxy for mock endpoints    │
  └──────────────┬───────────────────────────┘
-                │ clone(NEWPID|NEWNET|NEWNS)
-                ▼
- Ephemeral Execution Layer
- ┌──────────────────────────────────────────┐
- │  Isolated PID/NET/MNT/IPC namespaces     │
- │  seccomp-BPF syscall interception        │
- │  Hardware CoW (only dirty pages copied)  │
- │  tmpfs overlay for filesystem mutations  │
- └──────────────────────────────────────────┘
                 │
                 ▼
         StateDelta { memory, fs, network }
@@ -138,10 +146,11 @@ asyncio.run(main())
 
 ## Features
 
-- **Direct `dex` CLI** — Run any command ephemerally without configuration files
+- **Direct `dex` CLI** — Run any command ephemerally without configuration files or Docker
 - **`@dex.dry_run` decorator** — Zero boilerplate ephemeral execution for Python functions
 - **3-line agent loop** — Propose → dry-run → evaluate → self-correct → commit
-- **Kernel-level isolation** — Linux namespaces (PID, NET, MNT, IPC, UTS) with seccomp-BPF syscall filtering
+- **Native macOS support** — Kernel-level Seatbelt MAC sandboxing and APFS `clonefile` hardware CoW
+- **Kernel-level Linux isolation** — Linux namespaces (PID, NET, MNT, IPC, UTS) with seccomp-BPF filtering
 - **$O(P_{\text{dirty}})$ state diffing** — Soft-dirty pagemap tracking, no app-level hashing
 - **Transparent network proxy** — Schema-driven mock responses, zero external egress
 - **OpenTelemetry integration** — Structured JSON receipts and OTel span tracing
@@ -163,13 +172,17 @@ asyncio.run(main())
 
 ## Verification
 
-`dex` requires Linux kernel primitives. On macOS/Windows, run the container harness:
+### Native Local Verification (Linux & macOS)
+
+Run the local test harness directly on your machine (zero Docker required):
 
 ```bash
 ./scripts/test.sh
 ```
 
-Or via Docker directly:
+### Containerized Linux Verification (Cross-Platform)
+
+To test the complete Linux kernel primitive suite inside Docker:
 
 ```bash
 ./docker/build.sh

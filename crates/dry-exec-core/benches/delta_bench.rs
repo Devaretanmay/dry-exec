@@ -1,8 +1,9 @@
-#![cfg(target_os = "linux")]
-
+#[cfg(target_os = "linux")]
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+#[cfg(target_os = "linux")]
 use dry_exec_core::delta::AnonymousMemoryRegion;
 
+#[cfg(target_os = "linux")]
 fn bench_state_delta_memory(c: &mut Criterion) {
     let mut group = c.benchmark_group("state_delta_memory_diff");
 

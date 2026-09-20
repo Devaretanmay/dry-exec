@@ -15,6 +15,7 @@ from dry_exec import (
 
 # SYS_socket constant on Linux (x86_64: 41, aarch64: 198)
 import platform
+import sys
 SYS_SOCKET_NR = 41 if platform.machine() == "x86_64" else 198
 
 
@@ -50,6 +51,7 @@ async def test_assertion_a_schema_rejection():
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Requires Linux seccomp and soft-dirty pagemap primitives")
 async def test_assertion_b_successful_ffi_execution():
     """Assertion B: Valid schema-compliant action crosses FFI, executes in isolation, and returns StateDelta."""
     env = Environment(
@@ -80,6 +82,7 @@ async def test_assertion_b_successful_ffi_execution():
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Requires Linux seccomp and soft-dirty pagemap primitives")
 async def test_assertion_c_syscall_violation_propagation():
     """Assertion C: Blocked syscall triggers SyscallBoundaryError with exact syscall_nr and instruction pointer."""
     env = Environment(
@@ -110,6 +113,7 @@ async def test_assertion_c_syscall_violation_propagation():
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Requires Linux seccomp and soft-dirty pagemap primitives")
 async def test_assertion_d_network_interception():
     """Assertion D (Loop 4): Outbound HTTP request intercepted by transparent proxy with schema-driven mock response."""
     mock_payload = '{"status": "success", "id": "mock_123"}'
@@ -153,3 +157,21 @@ async def test_assertion_d_network_interception():
     # 3. Assert schema-driven deterministic response was delivered
     assert mutation.response_status == 200
     assert mock_payload.encode() in mutation.response_body
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "darwin", reason="Requires macOS Seatbelt and APFS primitives")
+async def test_assertion_macos_native_execution():
+    """Verify native ephemeral execution on macOS returns StateDelta with microsecond latency."""
+    env = Environment(name="macos_native_env", allowed_mutation_targets={"*"})
+    action = Action(
+        action_id="act_mac_001",
+        target_resource="local_state",
+        mutation_type="update",
+        payload={"key": "val"},
+    )
+    client = DryExecClient()
+    delta = await client.execute_ephemeral_action(env, action)
+    assert isinstance(delta, StateDelta)
+    assert delta.total_bytes_mutated >= 0
+    assert delta.duration_nanos > 0

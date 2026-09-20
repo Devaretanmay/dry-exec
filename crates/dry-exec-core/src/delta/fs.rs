@@ -108,7 +108,7 @@ fn traverse_dir(
             .to_path_buf();
 
         let stat = stat_path(&path)?;
-        let is_dir = (stat.mode & libc::S_IFMT) == libc::S_IFDIR;
+        let is_dir = (stat.mode & (libc::S_IFMT as u32)) == (libc::S_IFDIR as u32);
 
         records.insert(rel_path, stat);
 
