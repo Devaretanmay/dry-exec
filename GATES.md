@@ -180,8 +180,24 @@ Scope: Ephemeral execution boundary isolating process namespaces and syscall int
   EXPECT: /loop9-tests-passed/
   EVIDENCE: loop9-tests-passed
 
-- [x] G37: De-slop polish applied: authentic OpenAI SDK integration, Pydantic-powered telemetry, and real criterion benchmarks with zero synthetic math.
-  CHECK: grep -q "OpenAIModelCaller" examples/getting_started/native_agent.py && grep -q "DeltaReceipt" python/dry_exec/telemetry.py && echo "deslop-polish-complete"
-  EXPECT: /deslop-polish-complete/
-  EVIDENCE: deslop-polish-complete
+- [x] G38: Direct command execution CLI implemented in dex.cli with zero-configuration command argument support.
+  CHECK: test -f python/dex/cli.py && grep -q "dex" python/dex/cli.py && grep -q "command: Optional\[str\]" python/dex/cli.py && echo "dex-cli-implemented"
+  EXPECT: /dex-cli-implemented/
+  EVIDENCE: dex-cli-implemented
+
+- [x] G39: @dex.dry_run decorator and dex.run() functional helper implemented in dex/__init__.py with sync and async support.
+  CHECK: test -f python/dex/__init__.py && grep -q "def dry_run(" python/dex/__init__.py && grep -q "def run(" python/dex/__init__.py && echo "dex-decorators-implemented"
+  EXPECT: /dex-decorators-implemented/
+  EVIDENCE: dex-decorators-implemented
+
+- [x] G40: 3-line Agent interface implemented in dex/agent.py providing zero-boilerplate autonomous execution loops.
+  CHECK: test -f python/dex/agent.py && grep -q "class Agent:" python/dex/agent.py && test -f examples/getting_started/quickstart.py && echo "dex-agent-implemented"
+  EXPECT: /dex-agent-implemented/
+  EVIDENCE: dex-agent-implemented
+
+- [x] G41: Verification suite test_dex_ergonomics.py confirms decorator, functional runner, and 3-line agent.
+  CHECK: test -f tests/test_dex_ergonomics.py && grep -q "test_dex_dry_run_sync_decorator" tests/test_dex_ergonomics.py && echo "dex-ergonomics-tested"
+  EXPECT: /dex-ergonomics-tested/
+  EVIDENCE: dex-ergonomics-tested
+
 

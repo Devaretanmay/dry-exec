@@ -34,9 +34,10 @@ class Environment(BaseModel):
     """Target execution boundary defining permitted mutation targets, endpoints, and resource limits."""
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    name: str = Field(description="Identifier for the target environment")
+    name: str = Field(default="default_sandbox", description="Identifier for the target environment")
     allowed_mutation_targets: Set[str] = Field(
-        description="Immutable whitelist of state fields or entities permitted for mutation"
+        default_factory=lambda: {"*"},
+        description="Immutable whitelist of state fields or entities permitted for mutation",
     )
     allowed_filesystem_roots: List[str] = Field(
         default_factory=lambda: ["/tmp/dry_exec_ephemeral"],
@@ -56,7 +57,7 @@ class Environment(BaseModel):
         
         Raises SchemaViolationError immediately if the proposed action targets an unauthorized resource.
         """
-        if action.target_resource not in self.allowed_mutation_targets:
+        if "*" not in self.allowed_mutation_targets and action.target_resource not in self.allowed_mutation_targets:
             raise SchemaViolationError(
                 message=(
                     f"Action '{action.action_id}' targeting resource '{action.target_resource}' "

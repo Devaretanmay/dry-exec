@@ -1,6 +1,6 @@
 <div align="center">
 
-# dry-exec
+# dex (dry-exec)
 
 **Ephemeral kernel-level execution for autonomous loops.**
 
@@ -9,22 +9,22 @@ Explore state mutations without consequences. Commit only what you approve.
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
-[![Linux](https://img.shields.io/badge/Platform-Linux-green.svg)](#verification)
+[![Platform](https://img.shields.io/badge/Platform-Linux-green.svg)](#verification)
 [![CI](https://github.com/Devaretanmay/dry-exec/actions/workflows/ci.yml/badge.svg)](https://github.com/Devaretanmay/dry-exec/actions/workflows/ci.yml)
 
 </div>
 
 ---
 
-## What is dry-exec?
+## What is dex?
 
-`dry-exec` is a **deterministic state exploration primitive** for autonomous execution loops. It intercepts proposed mutations, runs them inside ephemeral Linux kernel namespaces, and returns the exact byte-level state delta — without ever touching your real environment.
+`dex` is a **deterministic state exploration primitive** for autonomous execution loops. It intercepts proposed mutations, runs them inside ephemeral Linux kernel namespaces, and returns the exact byte-level state delta — without ever touching your real environment.
 
 Think of it as `git diff` for arbitrary runtime state: memory, filesystem, and network — computed at the kernel level.
 
 ### Why?
 
-| Problem | dry-exec |
+| Problem | dex |
 |---|---|
 | Autonomous loops mutate state blindly | Every mutation runs in an isolated namespace first |
 | Rollback is expensive and error-prone | Nothing to roll back — baseline is never touched |
@@ -33,102 +33,70 @@ Think of it as `git diff` for arbitrary runtime state: memory, filesystem, and n
 
 ---
 
-## Which path do I need?
-
-- **[Path 1: CLI](#path-1-cli)** — Define environments and actions as YAML/JSON, run from the terminal.
-- **[Path 2: Python Library](#path-2-python-library)** — Import `dry_exec` into your code for programmatic control or agent loops.
-
----
-
-## Quickstart
+## Installation
 
 ```bash
 pip install dry-exec
 ```
 
-<br>
+---
 
-### Path 1: CLI
+## Quickstart
 
-Define your environment boundary and proposed action as YAML, then run:
+### Path 1: The `dex` CLI (Direct Command Execution)
 
-**`env.yaml`**
-```yaml
-name: production_db
-allowed_mutation_targets:
-  - users_table
-  - schema_version
-memory_limit_bytes: 67108864
-```
-
-**`action.yaml`**
-```yaml
-action_id: act_migrate_001
-target_resource: users_table
-mutation_type: update
-payload:
-  operation: add_column
-  column: email_verified
-  type: boolean
-```
+Run any command in an ephemeral sandbox. No YAML required:
 
 ```bash
-# Dry-run: inspect the state delta before committing
-dry-exec run --config env.yaml --action action.yaml
+# Dry-run: inspect the state delta without modifying host
+dex "python migrate.py"
 
-# Auto-commit without interactive prompt
-dry-exec run --config env.yaml --action action.yaml --commit
+# Commit changes only if the dry-run delta looks right
+dex --commit "npm run seed"
 
-# Inspect environment boundary definitions
-dry-exec inspect --config env.yaml
+# Inspect active environment limits and boundary rules
+dex inspect --config env.yaml
 ```
 
 <br>
 
-### Path 2: Python Library
+### Path 2: The `@dex.dry_run` Decorator
 
-#### Basic: single ephemeral execution
+Wrap any function to run inside an ephemeral kernel sandbox. Returns the computed `StateDelta`:
 
 ```python
-import asyncio
-from dry_exec import Action, DryExecClient, Environment
+import dex
 
-async def main():
-    env = Environment(
-        name="quickstart_env",
-        allowed_mutation_targets={"system_status"},
-    )
+@dex.dry_run
+def update_balance(account_id: str, amount: int):
+    # Runs in ephemeral sandbox; database is untouched
+    db.execute("UPDATE accounts SET balance = balance + $1 WHERE id = $2", amount, account_id)
 
-    action = Action(
-        action_id="act_001",
-        target_resource="system_status",
-        mutation_type="update",
-        payload={"status": "online"},
-    )
-
-    client = DryExecClient()
-    delta = await client.execute_ephemeral_action(env, action)
-    print(f"{delta.total_bytes_mutated} bytes mutated in {delta.duration_nanos}ns")
-
-asyncio.run(main())
+delta = update_balance("acc_101", 500)
+print(f"{delta.total_bytes_mutated} bytes mutated in {delta.duration_nanos}ns")
 ```
 
-#### Agent loop: propose → dry-run → self-correct → commit
+Or execute directly with functional `dex.run()`:
+
+```python
+delta = dex.run("python seed_data.py")
+```
+
+<br>
+
+### Path 3: The 3-Line Autonomous Agent Loop
+
+Let an autonomous execution loop propose actions, test them ephemerally, evaluate state deltas, and self-correct:
 
 ```python
 import asyncio
-from dry_exec import DryExecAgent, Environment
+from dex import Agent
 
 async def main():
-    env = Environment(
-        name="db_migration",
-        allowed_mutation_targets={"users_table", "schema_version"},
-    )
+    agent = Agent(task="Clean up old temp files and migrate user records")
+    result = await agent.run()
 
-    agent = DryExecAgent(environment=env, max_retries=3)
-    result = await agent.run("Migrate users table to v2 schema")
-
-    print(result)  # success=True, trials=2, committed=True
+    print(f"Success: {result.success}, Trials: {result.trials_conducted}, Committed: {result.committed}")
 
 asyncio.run(main())
 ```
@@ -140,7 +108,7 @@ asyncio.run(main())
 ```
  Autonomous Execution Loop (Python SDK)
  ┌──────────────────────────────────────────┐
- │  Pydantic V2 schema validation           │
+ │  @dex.dry_run or Agent(task=...).run()   │
  │  Async FFI dispatch (GIL released)       │
  │  Structured telemetry + OTel spans       │
  └──────────────┬───────────────────────────┘
@@ -166,20 +134,18 @@ asyncio.run(main())
         StateDelta { memory, fs, network }
 ```
 
-**Result:** You get a deterministic `StateDelta` containing every mutated memory page, filesystem inode, and intercepted network request — with zero changes to the baseline.
-
 ---
 
 ## Features
 
+- **Direct `dex` CLI** — Run any command ephemerally without configuration files
+- **`@dex.dry_run` decorator** — Zero boilerplate ephemeral execution for Python functions
+- **3-line agent loop** — Propose → dry-run → evaluate → self-correct → commit
 - **Kernel-level isolation** — Linux namespaces (PID, NET, MNT, IPC, UTS) with seccomp-BPF syscall filtering
 - **$O(P_{\text{dirty}})$ state diffing** — Soft-dirty pagemap tracking, no app-level hashing
 - **Transparent network proxy** — Schema-driven mock responses, zero external egress
-- **Type-safe Python SDK** — Pydantic V2 schemas, async-first client, structured exceptions
-- **Built-in agent loop** — Propose → dry-run → evaluate → self-correct → commit
 - **OpenTelemetry integration** — Structured JSON receipts and OTel span tracing
 - **Rich terminal visualization** — `DeltaLogger` renders memory/fs/network mutations
-- **Developer CLI** — `dry-exec run`, `dry-exec inspect`, `dry-exec version`
 
 ---
 
@@ -187,40 +153,23 @@ asyncio.run(main())
 
 | Example | Description |
 |---|---|
-| [`quickstart.py`](examples/getting_started/quickstart.py) | Minimal setup in 10 lines |
-| [`native_agent.py`](examples/getting_started/native_agent.py) | Self-correcting agent loop with OpenAI SDK |
+| [`quickstart.py`](examples/getting_started/quickstart.py) | 3-line setup with `@dex.dry_run` |
+| [`native_agent.py`](examples/getting_started/native_agent.py) | 3-line self-correcting agent loop |
 | [`type_safe_db_migration.py`](examples/use_cases/type_safe_db_migration.py) | DB migration recovering from schema boundary rejections |
 | [`api_payment_exploration.py`](examples/use_cases/api_payment_exploration.py) | Payment API exploration with mock interception |
 | [`langchain_tool.py`](examples/integrations/langchain_tool.py) | LangChain tool wrapper |
 
 ---
 
-## Project structure
-
-```
-dry-exec/
-├── crates/
-│   ├── dry-exec-core/          # Rust: namespaces, seccomp, CoW, pagemap, proxy
-│   └── dry-exec-pyo3/          # PyO3 FFI bridge
-├── python/dry_exec/            # Python SDK: client, agent, schemas, telemetry
-├── examples/                   # Getting started, use cases, integrations
-├── tests/                      # SDK tests, CLI tests, container harness
-├── scripts/                    # build.sh, lint.sh, test.sh
-├── docker/                     # CI container with Linux kernel primitives
-└── .github/workflows/          # CI, lint, release pipelines
-```
-
----
-
 ## Verification
 
-`dry-exec` requires Linux kernel primitives. On macOS/Windows, use the container harness:
+`dex` requires Linux kernel primitives. On macOS/Windows, run the container harness:
 
 ```bash
 ./scripts/test.sh
 ```
 
-Or run directly:
+Or via Docker directly:
 
 ```bash
 ./docker/build.sh

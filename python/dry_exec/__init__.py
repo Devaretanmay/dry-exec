@@ -1,6 +1,7 @@
 """dry-exec: Ephemeral execution primitive for deterministic state exploration."""
 
-from dry_exec.agent import AgentExecutionResult, DryExecAgent
+from dex.agent import Agent, AgentExecutionResult, DryExecAgent
+from dex import dry_run, run
 from dry_exec.client import DryExecClient
 from dry_exec.exceptions import (
     DryExecError,
@@ -15,6 +16,9 @@ from dry_exec.schemas import Action, Environment, MockResponse
 from dry_exec.telemetry import TelemetryExporter
 
 __all__ = [
+    "Agent",
+    "dry_run",
+    "run",
     "DryExecClient",
     "DryExecAgent",
     "AgentExecutionResult",
