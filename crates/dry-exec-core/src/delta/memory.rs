@@ -50,6 +50,14 @@ impl AnonymousMemoryRegion {
             )));
         }
 
+        // Byte-precise delta tracking requires 4KB page-table granularity: a transparent huge
+        // page marks an entire 2MB range soft-dirty for a single byte mutation, which defeats
+        // the O(P_dirty) scan bound by forcing reads of untouched pages.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            let _ = libc::madvise(ptr, aligned_len, libc::MADV_NOHUGEPAGE);
+        }
+
         Ok(Self {
             ptr: NonNull::new(ptr as *mut u8)
                 .ok_or_else(|| DeltaError::MmapFailure("mmap returned NULL pointer".into()))?,
