@@ -20,6 +20,7 @@ The Loop 1 objective establishes the ephemeral execution boundary in the Rust co
 |  1. Namespace isolation configuration                       |
 |     - Private mount propagation & sterile /proc             |
 |     - Loopback-only isolated network namespace              |
+|     - In-namespace transparent proxy mock listener          |
 |  2. Seccomp-BPF syscall interception filter attachment      |
 |     - Strict whitelist of allowed syscalls                  |
 |     - Immediate SIGSYS termination on boundary breach       |
@@ -132,6 +133,16 @@ pub struct IsolatedProcess {
     sync_fd: std::os::unix::io::RawFd,
 }
 ```
+
+### 3.4 Transparent Proxy Boundary Handshake (`delta::network`)
+
+The isolated execution layer occupies a dedicated `CLONE_NEWNET`, so a listener bound on the control plane's loopback is unreachable from within the boundary. The mock listener must therefore be bound **inside** the isolated namespace, while the requests it intercepts are recorded on the control plane.
+
+1.  The control plane reserves a loopback port (`TransparentProxy::reserve_loopback_port`) and carries the schema-driven route table in the boundary configuration.
+2.  The execution layer enables the namespace loopback interface (`SIOCSIFFLAGS`), which starts `down` and yields `ENETUNREACH` on connect until enabled.
+3.  The execution layer binds the schema listener on that port and forwards the descriptor to the control plane as `SCM_RIGHTS` control data attached to the readiness frame.
+4.  The control plane constructs `TransparentProxy::from_listener` over the forwarded descriptor and serves it: the socket stays bound inside the isolated namespace, so requests originating there reach the proxy, while accepted connections and the mutation ledger remain on the control plane.
+5.  During inspection the proxy is surfaced through `BoundaryContext::network` and adopted by `DeltaCoordinator::set_network_proxy`, so intercepted requests are aggregated into `StateDelta.network_mutations` alongside memory and filesystem mutations.
 
 ---
 

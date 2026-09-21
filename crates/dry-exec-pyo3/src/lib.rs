@@ -34,6 +34,8 @@ fn execute_isolated_action(
     #[cfg(target_os = "linux")]
     use dry_exec_core::delta::AnonymousMemoryRegion;
     use dry_exec_core::delta::{DeltaCoordinator, MockResponse, NetworkMockSchema};
+    #[cfg(target_os = "linux")]
+    use dry_exec_core::delta::{NetworkBoundary, TransparentProxy};
 
     let _ = (action_json, memory_size);
 
@@ -66,35 +68,42 @@ fn execute_isolated_action(
             return Err(format!("Filesystem baseline snapshot error: {e}"));
         }
 
-        let proxy_port = if let Some(endpoints) = mock_endpoints {
-            let mut schema = NetworkMockSchema::new();
-            for (method, path, status_code, headers, body) in endpoints {
-                schema.register_endpoint(
-                    method,
-                    path,
-                    MockResponse {
-                        status_code,
-                        headers,
-                        body,
-                    },
-                );
+        // Reserve the loopback port for the schema-driven mock listener. The isolated execution
+        // layer binds it inside its own network namespace and the control plane serves it, which
+        // is the only way requests originating in that namespace can reach the transparent proxy.
+        let network_boundary = match mock_endpoints {
+            Some(endpoints) => {
+                let mut schema = NetworkMockSchema::new();
+                for (method, path, status_code, headers, body) in endpoints {
+                    schema.register_endpoint(
+                        method,
+                        path,
+                        MockResponse {
+                            status_code,
+                            headers,
+                            body,
+                        },
+                    );
+                }
+                let port = TransparentProxy::reserve_loopback_port()
+                    .map_err(|e| format!("Network proxy initialization error: {e}"))?;
+                Some(NetworkBoundary { port, schema })
             }
-            Some(
-                coordinator
-                    .start_network_proxy(schema)
-                    .map_err(|e| format!("Network proxy initialization error: {e}"))?,
-            )
-        } else {
-            None
+            None => None,
         };
+        let proxy_port = network_boundary.as_ref().map(|boundary| boundary.port);
 
         let mut filter = SeccompFilter::new(SyscallAction::Trap).with_baseline_whitelist();
         if request_to_trigger.is_some() {
+            // Outbound request surface for a userspace HTTP client: socket setup, connection,
+            // and request/response IO. `fcntl` is included because the standard library's socket
+            // types manipulate descriptor flags, and the request cannot complete without it.
             filter = filter
                 .allow(libc::SYS_socket)
                 .allow(libc::SYS_connect)
                 .allow(libc::SYS_sendto)
-                .allow(libc::SYS_recvfrom);
+                .allow(libc::SYS_recvfrom)
+                .allow(libc::SYS_fcntl);
         }
 
         let config = ProcessBoundaryConfig {
@@ -103,6 +112,7 @@ fn execute_isolated_action(
                 mount_sterile_proc: true,
             },
             seccomp_filter: filter,
+            network_boundary,
             ..Default::default()
         };
 
@@ -138,9 +148,14 @@ fn execute_isolated_action(
                     }
                 }
             },
-            |child_pid| {
+            |context| {
+                // Adopt the proxy serving the isolated namespace so intercepted network mutations
+                // are aggregated into the state delta alongside memory and filesystem mutations.
+                if let Some(proxy) = context.network {
+                    coordinator.set_network_proxy(proxy);
+                }
                 coordinator.compute_full_delta(
-                    child_pid,
+                    context.child_pid,
                     region.as_ref().map(|r| (r, memory_size)),
                 )
             },

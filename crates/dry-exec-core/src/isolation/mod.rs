@@ -12,10 +12,11 @@ pub mod seccomp;
 #[cfg(target_os = "linux")]
 pub use mount::{mount_ephemeral_tmpfs, set_mount_propagation_private, MountConfig};
 #[cfg(target_os = "linux")]
-pub use namespace::NamespaceFlags;
+pub use namespace::{bring_loopback_up, NamespaceFlags};
 #[cfg(target_os = "linux")]
 pub use process::{
-    execute_isolated_process, execute_isolated_process_with_inspection, ProcessBoundaryConfig,
+    execute_isolated_process, execute_isolated_process_with_inspection, BoundaryContext,
+    ProcessBoundaryConfig,
 };
 #[cfg(target_os = "linux")]
 pub use seccomp::{SeccompFilter, SyscallAction};

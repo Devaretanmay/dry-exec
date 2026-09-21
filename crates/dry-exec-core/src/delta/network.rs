@@ -59,6 +59,22 @@ impl NetworkMockSchema {
     }
 }
 
+/// Deterministic network boundary: a reserved loopback port plus the schema-driven route table.
+///
+/// The isolated execution layer binds the listener for `port` inside its own network namespace
+/// and forwards the descriptor to the control plane, which serves it. Interception is therefore
+/// reachable from within the boundary while every recorded mutation stays on the control plane.
+#[derive(Debug, Clone)]
+pub struct NetworkBoundary {
+    pub port: u16,
+    pub schema: NetworkMockSchema,
+}
+
+/// Bind the schema-driven mock listener on loopback inside the calling network namespace.
+pub fn bind_loopback_listener(port: u16) -> Result<TcpListener, DeltaError> {
+    TcpListener::bind(("127.0.0.1", port)).map_err(DeltaError::IoError)
+}
+
 /// Local transparent proxy operating within the isolated network namespace.
 pub struct TransparentProxy {
     port: u16,
@@ -69,8 +85,22 @@ pub struct TransparentProxy {
 
 impl TransparentProxy {
     /// Start transparent proxy listener on loopback interface with schema-driven mocking.
+    ///
+    /// The listener is bound in the calling network namespace, which makes it reachable only from
+    /// that namespace. To intercept requests originating inside an isolated namespace, reserve a
+    /// port with [`TransparentProxy::reserve_loopback_port`], have the isolated execution layer
+    /// bind it, and adopt the forwarded descriptor with [`TransparentProxy::from_listener`].
     pub fn start(schema: NetworkMockSchema) -> Result<Self, DeltaError> {
-        let listener = TcpListener::bind("127.0.0.1:0").map_err(DeltaError::IoError)?;
+        let port = Self::reserve_loopback_port()?;
+        Self::from_listener(bind_loopback_listener(port)?, schema)
+    }
+
+    /// Serve deterministic mock responses on a listener bound inside the isolated network
+    /// namespace. Accepted connections are recorded into this control-plane instance.
+    pub fn from_listener(
+        listener: TcpListener,
+        schema: NetworkMockSchema,
+    ) -> Result<Self, DeltaError> {
         let port = listener.local_addr().map_err(DeltaError::IoError)?.port();
 
         let is_running = Arc::new(AtomicBool::new(true));
@@ -78,9 +108,10 @@ impl TransparentProxy {
         let intercepted = Arc::new(Mutex::new(Vec::new()));
         let intercepted_clone = intercepted.clone();
 
-        // Enforce 100ms accept timeout so proxy thread checks running flag regularly
+        // Poll the listener so the serving thread observes shutdown without depending on a
+        // wake-up connection, which cannot reach a listener bound in another network namespace.
         listener
-            .set_nonblocking(false)
+            .set_nonblocking(true)
             .map_err(DeltaError::IoError)?;
 
         let server_thread = thread::spawn(move || {
@@ -88,7 +119,11 @@ impl TransparentProxy {
             while running_clone.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
                         handle_connection(stream, &schema, &intercepted_clone);
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(2));
                     }
                     Err(_) => {
                         thread::sleep(Duration::from_millis(10));
@@ -105,6 +140,12 @@ impl TransparentProxy {
         })
     }
 
+    /// Reserve an unused loopback port for a listener bound inside the isolated network namespace.
+    pub fn reserve_loopback_port() -> Result<u16, DeltaError> {
+        let probe = TcpListener::bind("127.0.0.1:0").map_err(DeltaError::IoError)?;
+        Ok(probe.local_addr().map_err(DeltaError::IoError)?.port())
+    }
+
     pub fn port(&self) -> u16 {
         self.port
     }
@@ -119,12 +160,59 @@ impl TransparentProxy {
 impl Drop for TransparentProxy {
     fn drop(&mut self) {
         self.is_running.store(false, Ordering::Relaxed);
-        // Connect to unblock accept call if waiting
-        let _ = TcpStream::connect(format!("127.0.0.1:{}", self.port));
         if let Some(handle) = self.server_thread.take() {
             let _ = handle.join();
         }
     }
+}
+
+/// Bounded request buffer: a single intercepted request never exceeds this ceiling.
+const REQUEST_BUFFER_BYTES: usize = 16 * 1024;
+
+/// Offset of the request head terminator, marking the start of the body.
+fn find_head_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+/// Declared body length from the request head, if the header is present.
+fn declared_content_length(head: &[u8]) -> Option<usize> {
+    String::from_utf8_lossy(head).lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().ok())?
+    })
+}
+
+/// Whether the buffered bytes hold a complete request head and its declared body.
+fn request_is_complete(buf: &[u8]) -> bool {
+    match find_head_end(buf) {
+        Some(head_end) => match declared_content_length(&buf[..head_end]) {
+            Some(len) => buf.len() - (head_end + 4) >= len,
+            None => true,
+        },
+        None => false,
+    }
+}
+
+/// Read a single intercepted request, tolerating TCP segmentation and honoring the read timeout.
+fn read_request(stream: &mut TcpStream) -> Option<Vec<u8>> {
+    let mut buf = vec![0u8; REQUEST_BUFFER_BYTES];
+    let mut filled = 0usize;
+
+    loop {
+        match stream.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => {
+                filled += n;
+                if request_is_complete(&buf[..filled]) || filled == buf.len() {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+
+    (filled > 0).then(|| buf[..filled].to_vec())
 }
 
 /// Parse HTTP request, enforce schema boundaries, and return deterministic response.
@@ -138,14 +226,12 @@ fn handle_connection(
     let _ = stream.set_read_timeout(timeout);
     let _ = stream.set_write_timeout(timeout);
 
-    let mut buf = [0u8; 4096];
-    let n = match stream.read(&mut buf) {
-        Ok(n) if n > 0 => n,
-        _ => return,
+    let raw_request = match read_request(&mut stream) {
+        Some(request) => request,
+        None => return,
     };
-
-    let raw_request = &buf[..n];
-    let request_str = String::from_utf8_lossy(raw_request);
+    let n = raw_request.len();
+    let request_str = String::from_utf8_lossy(&raw_request);
     let mut lines = request_str.lines();
 
     let request_line = match lines.next() {
@@ -172,7 +258,7 @@ fn handle_connection(
     }
 
     // Extract request body if present
-    let body_offset = request_str.find("\r\n\r\n").map(|idx| idx + 4).unwrap_or(n);
+    let body_offset = find_head_end(&raw_request).map(|idx| idx + 4).unwrap_or(n);
     let request_body = if body_offset < n {
         raw_request[body_offset..n].to_vec()
     } else {

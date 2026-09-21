@@ -11,14 +11,14 @@ pub mod isolation;
 
 pub use delta::{
     AnonymousMemoryRegion, ByteDelta, DeltaCoordinator, FsMutation, InterceptedRequest,
-    MockResponse, NetworkMockSchema, PageMutation, StateDelta, TransparentProxy,
+    MockResponse, NetworkBoundary, NetworkMockSchema, PageMutation, StateDelta, TransparentProxy,
 };
 pub use error::{BoundaryExitStatus, DeltaError, IsolationError};
 
 #[cfg(target_os = "linux")]
 pub use isolation::{
-    execute_isolated_process, execute_isolated_process_with_inspection, MountConfig,
-    NamespaceFlags, ProcessBoundaryConfig, SeccompFilter, SyscallAction,
+    execute_isolated_process, execute_isolated_process_with_inspection, BoundaryContext,
+    MountConfig, NamespaceFlags, ProcessBoundaryConfig, SeccompFilter, SyscallAction,
 };
 
 #[cfg(target_os = "macos")]

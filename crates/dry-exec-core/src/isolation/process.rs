@@ -1,13 +1,15 @@
 //! Ephemeral process execution layer and control plane synchronization boundary.
 
+use crate::delta::network::{bind_loopback_listener, NetworkBoundary, TransparentProxy};
 use crate::error::{BoundaryExitStatus, IsolationError};
 use crate::isolation::mount::{mount_ephemeral_tmpfs, set_mount_propagation_private, MountConfig};
-use crate::isolation::namespace::NamespaceFlags;
+use crate::isolation::namespace::{bring_loopback_up, NamespaceFlags};
 use crate::isolation::seccomp::SeccompFilter;
 use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
 use nix::sys::wait::{waitpid, WaitStatus};
 use nix::unistd::Pid;
-use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::net::TcpListener;
+use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 
 const STACK_SIZE: usize = 2 * 1024 * 1024; // 2MB stack for cloned execution layer
 
@@ -119,6 +121,12 @@ pub struct ProcessBoundaryConfig {
     pub namespaces: NamespaceFlags,
     pub mount_config: MountConfig,
     pub seccomp_filter: SeccompFilter,
+
+    /// Optional deterministic network boundary. When configured, the isolated execution layer
+    /// binds the mock listener inside its own network namespace and forwards the descriptor to
+    /// the control plane, which serves it: outbound requests from within the boundary reach the
+    /// transparent proxy, and every interception is recorded on the control plane.
+    pub network_boundary: Option<NetworkBoundary>,
 }
 
 impl Default for ProcessBoundaryConfig {
@@ -127,8 +135,139 @@ impl Default for ProcessBoundaryConfig {
             namespaces: NamespaceFlags::default(),
             mount_config: MountConfig::default(),
             seccomp_filter: SeccompFilter::default().with_baseline_whitelist(),
+            network_boundary: None,
         }
     }
+}
+
+/// Control-plane view of the live isolated execution layer during state inspection.
+pub struct BoundaryContext {
+    /// PID of the live isolated execution layer, blocked on the synchronization boundary.
+    pub child_pid: i32,
+
+    /// Transparent proxy serving the isolated network namespace's mock listener. Present when the
+    /// boundary was configured with a [`NetworkBoundary`].
+    pub network: Option<TransparentProxy>,
+}
+
+/// Control message buffer, aligned for the `cmsghdr` stored by the kernel.
+#[repr(C, align(8))]
+struct ControlBuffer([u8; 64]);
+
+/// Send the readiness frame, optionally carrying a descriptor to forward to the control plane.
+fn send_boundary_ready(fd: RawFd, forward: Option<RawFd>) -> std::io::Result<()> {
+    let payload = [BOUNDARY_READY];
+    let mut iov = libc::iovec {
+        iov_base: payload.as_ptr() as *mut libc::c_void,
+        iov_len: payload.len(),
+    };
+    let mut control = ControlBuffer([0u8; 64]);
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_iov = &mut iov;
+    message.msg_iovlen = 1;
+
+    if let Some(raw_fd) = forward {
+        let fd_size = std::mem::size_of::<libc::c_int>();
+        message.msg_control = control.0.as_mut_ptr() as *mut libc::c_void;
+        message.msg_controllen = unsafe { libc::CMSG_SPACE(fd_size as libc::c_uint) as usize };
+
+        let header = unsafe { libc::CMSG_FIRSTHDR(&message) };
+        if header.is_null() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "control message buffer too small for a forwarded descriptor",
+            ));
+        }
+
+        unsafe {
+            (*header).cmsg_level = libc::SOL_SOCKET;
+            (*header).cmsg_type = libc::SCM_RIGHTS;
+            (*header).cmsg_len = libc::CMSG_LEN(fd_size as libc::c_uint) as usize;
+            std::ptr::copy_nonoverlapping(
+                &raw_fd as *const RawFd as *const u8,
+                libc::CMSG_DATA(header),
+                fd_size,
+            );
+        }
+    }
+
+    let sent = unsafe { libc::sendmsg(fd, &message, libc::MSG_NOSIGNAL) };
+    if sent < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if sent != payload.len() as isize {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WriteZero,
+            "short readiness frame write",
+        ));
+    }
+
+    Ok(())
+}
+
+/// Receive the readiness frame, extracting a forwarded listener descriptor when present.
+fn recv_boundary_ready(fd: RawFd) -> (u8, Option<OwnedFd>) {
+    let mut payload = [0u8; 1];
+    let mut iov = libc::iovec {
+        iov_base: payload.as_mut_ptr() as *mut libc::c_void,
+        iov_len: payload.len(),
+    };
+    let mut control = ControlBuffer([0u8; 64]);
+    let mut message: libc::msghdr = unsafe { std::mem::zeroed() };
+    message.msg_iov = &mut iov;
+    message.msg_iovlen = 1;
+    message.msg_control = control.0.as_mut_ptr() as *mut libc::c_void;
+    message.msg_controllen = control.0.len();
+
+    let received = unsafe { libc::recvmsg(fd, &mut message, libc::MSG_CMSG_CLOEXEC) };
+    if received < 1 {
+        return (0, None);
+    }
+
+    let fd_size = std::mem::size_of::<libc::c_int>();
+    let header = unsafe { libc::CMSG_FIRSTHDR(&message) };
+    let mut forwarded = None;
+
+    unsafe {
+        let carries_descriptor = !header.is_null()
+            && (*header).cmsg_level == libc::SOL_SOCKET
+            && (*header).cmsg_type == libc::SCM_RIGHTS
+            && (*header).cmsg_len >= libc::CMSG_LEN(fd_size as libc::c_uint) as usize;
+
+        if carries_descriptor {
+            let mut raw_fd: RawFd = -1;
+            std::ptr::copy_nonoverlapping(
+                libc::CMSG_DATA(header),
+                &mut raw_fd as *mut RawFd as *mut u8,
+                fd_size,
+            );
+            if raw_fd >= 0 {
+                forwarded = Some(OwnedFd::from_raw_fd(raw_fd));
+            }
+        }
+    }
+
+    (payload[0], forwarded)
+}
+
+/// Terminate and reap an execution layer that cannot complete its boundary handshake.
+fn terminate_child(pid: Pid) {
+    unsafe { libc::kill(pid.as_raw(), libc::SIGKILL) };
+    let _ = waitpid(pid, None);
+}
+
+/// Wire the isolated network boundary: enable namespace loopback so the mock listener is
+/// reachable from within the boundary, then forward the bound listener to the control plane.
+fn prepare_network_boundary(
+    boundary: &NetworkBoundary,
+    child_fd: RawFd,
+) -> Result<(), IsolationError> {
+    bring_loopback_up()?;
+    let listener = bind_loopback_listener(boundary.port)?;
+    send_boundary_ready(child_fd, Some(listener.as_raw_fd())).map_err(|e| {
+        IsolationError::SyncError(format!("Failed to forward network boundary listener: {e}"))
+    })?;
+    Ok(())
 }
 
 /// Write a control-plane protocol byte ignoring `SIGPIPE` when the peer boundary is gone.
@@ -171,7 +310,7 @@ where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
 {
-    execute_isolated_process_with_inspection(config, action, |_child_pid| ())
+    execute_isolated_process_with_inspection(config, action, |_context| ())
         .map(|(status, _)| (status, None))
 }
 
@@ -181,7 +320,9 @@ where
 /// The isolated execution layer retains its Copy-on-Write address space, blocked on the
 /// synchronization boundary, for the duration of `inspect`. This allows the state delta engine
 /// to sample `[pid]/pagemap` soft-dirty bits and read mutated pages before the boundary closes.
-/// `inspect` receives the live child PID; its return value is surfaced alongside the exit status.
+/// `inspect` receives a [`BoundaryContext`] carrying the live child PID and, when a network
+/// boundary is configured, the transparent proxy serving the isolated namespace; its return
+/// value is surfaced alongside the exit status.
 pub fn execute_isolated_process_with_inspection<F, R, I, T>(
     config: &ProcessBoundaryConfig,
     action: F,
@@ -190,7 +331,7 @@ pub fn execute_isolated_process_with_inspection<F, R, I, T>(
 where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
-    I: FnOnce(i32) -> T,
+    I: FnOnce(BoundaryContext) -> T,
 {
     // Create synchronization socketpair for parent-child boundary coordination
     let mut fds = [0; 2];
@@ -255,9 +396,16 @@ where
             let _ = mount_ephemeral_tmpfs(&payload.config.mount_config.tmpfs_path);
         }
 
-        // 2. Notify parent control plane: child ready for baseline reset
-        let ready_byte: [u8; 1] = [BOUNDARY_READY];
-        let _ = unsafe { libc::write(child_fd, ready_byte.as_ptr() as *const libc::c_void, 1) };
+        // 2. Notify parent control plane: child ready for baseline reset. When a network boundary
+        //    is configured, the isolated network namespace binds the schema-driven mock listener
+        //    and forwards the descriptor, so outbound requests reach the transparent proxy.
+        let ready = match payload.config.network_boundary.as_ref() {
+            Some(boundary) => prepare_network_boundary(boundary, child_fd).is_ok(),
+            None => send_boundary_ready(child_fd, None).is_ok(),
+        };
+        if !ready {
+            unsafe { libc::_exit(3) }
+        }
 
         // 3. Await parent acknowledgment (baseline clear completion)
         let mut ack_byte = [0u8; 1];
@@ -308,18 +456,34 @@ where
 
     let pid = Pid::from_raw(child_pid);
 
-    // Coordinate with child across synchronization boundary
-    // Await child readiness byte
-    let mut ready_buf = [0u8; 1];
-    let n = unsafe {
-        libc::read(
-            parent_sock.as_raw_fd(),
-            ready_buf.as_mut_ptr() as *mut libc::c_void,
-            1,
-        )
+    // Coordinate with child across synchronization boundary: the readiness frame carries the
+    // isolated network namespace's mock listener descriptor when a network boundary is configured.
+    let (ready_byte, forwarded_listener) = recv_boundary_ready(parent_sock.as_raw_fd());
+
+    // Serve the forwarded listener on the control plane. The listener stays bound inside the
+    // isolated network namespace, so connections originating there reach this proxy.
+    let network = match (forwarded_listener, config.network_boundary.as_ref()) {
+        (Some(forwarded), Some(boundary)) => {
+            let listener = unsafe { TcpListener::from_raw_fd(forwarded.into_raw_fd()) };
+            match TransparentProxy::from_listener(listener, boundary.schema.clone()) {
+                Ok(proxy) => Some(proxy),
+                Err(e) => {
+                    terminate_child(pid);
+                    return Err(IsolationError::DeltaError(e));
+                }
+            }
+        }
+        (Some(_), None) => {
+            terminate_child(pid);
+            return Err(IsolationError::SyncError(
+                "Received an unexpected network boundary listener from the isolated execution layer"
+                    .to_string(),
+            ));
+        }
+        (None, _) => None,
     };
 
-    if n > 0 {
+    if ready_byte == BOUNDARY_READY {
         // Reset kernel page-table tracking for child: write "4\n" to /proc/[pid]/clear_refs
         let clear_refs_path = format!("/proc/{}/clear_refs", child_pid);
         if let Ok(mut file) = std::fs::File::create(&clear_refs_path) {
@@ -393,8 +557,8 @@ where
         return Ok((status, None));
     }
 
-    // Clean completion: the address space is live and inspectable until released
-    let inspection = inspect(child_pid);
+    // Clean completion: the address space and network boundary are live until released
+    let inspection = inspect(BoundaryContext { child_pid, network });
 
     send_control_byte(parent_sock.as_raw_fd(), 1);
 

@@ -123,8 +123,8 @@ async def test_assertion_c_syscall_violation_propagation():
     reason="Requires Linux seccomp and soft-dirty pagemap primitives",
 )
 async def test_assertion_d_network_interception():
-    """Assertion D (Loop 4): Outbound HTTP egress stays confined to the isolated network namespace,
-    so the control plane loopback proxy is unreachable and no request is intercepted across it.
+    """Assertion D (Loop 4): Outbound HTTP egress from the isolated network namespace reaches the
+    transparent proxy, which returns the schema-driven mock response and records the mutation.
     """
     mock_payload = '{"status": "success", "id": "mock_123"}'
     env = Environment(
@@ -155,11 +155,17 @@ async def test_assertion_d_network_interception():
         request_to_trigger=("POST", "/v1/charge", '{"amount": 5000}'),
     )
 
-    # The isolated execution layer runs in its own network namespace, so egress cannot reach
-    # the control plane loopback proxy: no request crosses the boundary and nothing is recorded.
-    assert delta.network_mutations == []
+    # The isolated execution layer binds the schema-driven mock listener inside its own network
+    # namespace and the control plane serves it: the outbound request is intercepted and recorded.
+    assert len(delta.network_mutations) == 1
+    mutation = delta.network_mutations[0]
+    assert mutation.method == "POST"
+    assert mutation.url == "/v1/charge"
+    assert mutation.request_body == b'{"amount": 5000}'
+    assert mutation.response_status == 200
+    assert mutation.response_body == mock_payload.encode()
 
-    # Schema-driven routes remain enforced on the control plane side of the boundary.
+    # Schema-driven routes are the source of the served response.
     registered_route = env.allowed_api_endpoints["POST /v1/charge"]
     assert registered_route.status_code == 200
     assert mock_payload in registered_route.body

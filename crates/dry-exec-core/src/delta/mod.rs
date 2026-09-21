@@ -15,7 +15,9 @@ pub use fs::{FsSnapshot, InodeRecord};
 #[cfg(target_os = "linux")]
 pub use memory::{clear_soft_dirty_bits, read_process_memory};
 pub use memory::{AnonymousMemoryRegion, PAGE_SIZE};
-pub use network::{MockResponse, NetworkMockSchema, TransparentProxy};
+pub use network::{
+    bind_loopback_listener, MockResponse, NetworkBoundary, NetworkMockSchema, TransparentProxy,
+};
 #[cfg(target_os = "linux")]
 pub use pagemap::scan_dirty_pages;
 pub use types::{ByteDelta, FsMutation, InterceptedRequest, PageMutation, StateDelta};
@@ -56,11 +58,25 @@ impl DeltaCoordinator {
     }
 
     /// Initialize transparent network proxy on loopback interface with schema mock routes.
+    ///
+    /// The listener is bound in the control plane's network namespace, so it intercepts requests
+    /// originating there. Interception inside an isolated network namespace requires the listener
+    /// to be bound there instead, forwarded through the boundary, and adopted with
+    /// [`DeltaCoordinator::set_network_proxy`].
     pub fn start_network_proxy(&mut self, schema: NetworkMockSchema) -> Result<u16, DeltaError> {
         let proxy = TransparentProxy::start(schema)?;
         let port = proxy.port();
         self.network_proxy = Some(proxy);
         Ok(port)
+    }
+
+    /// Adopt the transparent proxy serving the isolated network namespace's mock listener.
+    ///
+    /// The isolated execution layer binds the listener in its own namespace and the boundary
+    /// forwards the descriptor, so intercepted requests are recorded on the control plane while
+    /// the network boundary itself stays isolated.
+    pub fn set_network_proxy(&mut self, proxy: TransparentProxy) {
+        self.network_proxy = Some(proxy);
     }
 
     /// Compute full state delta post-execution.

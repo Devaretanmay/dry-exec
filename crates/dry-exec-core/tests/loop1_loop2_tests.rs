@@ -1,7 +1,10 @@
 //! Containerized verification suite for Loop 1 and Loop 2 primitives.
 #![cfg(target_os = "linux")]
 
-use dry_exec_core::delta::{scan_dirty_pages, AnonymousMemoryRegion, DeltaCoordinator};
+use dry_exec_core::delta::{
+    scan_dirty_pages, AnonymousMemoryRegion, DeltaCoordinator, MockResponse, NetworkBoundary,
+    NetworkMockSchema, TransparentProxy,
+};
 use dry_exec_core::error::BoundaryExitStatus;
 use dry_exec_core::isolation::{
     execute_isolated_process, execute_isolated_process_with_inspection, ProcessBoundaryConfig,
@@ -13,6 +16,23 @@ use std::time::Instant;
 fn trap_boundary_config() -> ProcessBoundaryConfig {
     ProcessBoundaryConfig {
         seccomp_filter: SeccompFilter::new(SyscallAction::Trap).with_baseline_whitelist(),
+        ..Default::default()
+    }
+}
+
+/// Boundary configuration permitting outbound request primitives so the isolated execution layer
+/// can reach the transparent proxy inside its own network namespace.
+fn network_boundary_config(boundary: NetworkBoundary) -> ProcessBoundaryConfig {
+    let filter = SeccompFilter::new(SyscallAction::Trap)
+        .with_baseline_whitelist()
+        .allow(libc::SYS_socket)
+        .allow(libc::SYS_connect)
+        .allow(libc::SYS_sendto)
+        .allow(libc::SYS_recvfrom);
+
+    ProcessBoundaryConfig {
+        seccomp_filter: filter,
+        network_boundary: Some(boundary),
         ..Default::default()
     }
 }
@@ -105,7 +125,7 @@ fn test_assertion_b_state_delta_precision() {
                 .expect("Failed to write ephemeral file");
         },
         // Inspect the live isolated execution layer while its CoW address space is retained
-        |child_pid| coordinator.compute_full_delta(child_pid, Some((&region, region_size))),
+        |context| coordinator.compute_full_delta(context.child_pid, Some((&region, region_size))),
     )
     .expect("Process boundary execution failed");
 
@@ -183,5 +203,129 @@ fn test_assertion_c_computational_complexity_bound() {
         elapsed.as_micros() < 1000,
         "Delta scan duration {} us exceeded 1000 us (1ms) bound",
         elapsed.as_micros()
+    );
+}
+
+#[test]
+fn test_assertion_e_network_boundary_interception() {
+    // Assertion E: The isolated execution layer occupies its own CLONE_NEWNET, so the
+    // transparent proxy must be reachable from within that namespace. The boundary binds the
+    // schema-driven mock listener there and forwards the descriptor to the control plane, which
+    // serves it: the outbound request is intercepted and recorded as a network mutation.
+    let mut schema = NetworkMockSchema::new();
+    schema.register_endpoint(
+        "POST",
+        "/v1/charges",
+        MockResponse {
+            status_code: 200,
+            headers: std::collections::HashMap::from([(
+                "Content-Type".to_string(),
+                "application/json".to_string(),
+            )]),
+            body: b"{\"id\":\"ch_mock_9988\"}".to_vec(),
+        },
+    );
+
+    let port = TransparentProxy::reserve_loopback_port().expect("Failed to reserve proxy port");
+    let config = network_boundary_config(NetworkBoundary { port, schema });
+
+    let mut coordinator = DeltaCoordinator::new();
+    let request = b"POST /v1/charges HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\n\r\n{}";
+
+    let (exit_status, inspected) = execute_isolated_process_with_inspection(
+        &config,
+        move || {
+            // Connect to the mock listener bound inside this network namespace. Distinct exit
+            // codes localize a handshake failure without crossing the boundary with diagnostics.
+            let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+            if sock < 0 {
+                unsafe { libc::_exit(91) }
+            }
+
+            let mut address: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            address.sin_family = libc::AF_INET as libc::sa_family_t;
+            address.sin_port = port.to_be();
+            address.sin_addr.s_addr = u32::from(std::net::Ipv4Addr::LOCALHOST).to_be();
+
+            let connected = unsafe {
+                libc::connect(
+                    sock,
+                    &address as *const libc::sockaddr_in as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                )
+            };
+            if connected != 0 {
+                unsafe { libc::_exit(92) }
+            }
+
+            let sent = unsafe {
+                libc::send(
+                    sock,
+                    request.as_ptr() as *const libc::c_void,
+                    request.len(),
+                    libc::MSG_NOSIGNAL,
+                )
+            };
+            if sent != request.len() as isize {
+                unsafe { libc::_exit(93) }
+            }
+
+            let mut response = [0u8; 1024];
+            let mut received = 0usize;
+            while received < response.len() {
+                let n = unsafe {
+                    libc::recv(
+                        sock,
+                        response[received..].as_mut_ptr() as *mut libc::c_void,
+                        response.len() - received,
+                        0,
+                    )
+                };
+                if n <= 0 {
+                    break;
+                }
+                received += n as usize;
+            }
+
+            if received == 0 {
+                unsafe { libc::_exit(94) }
+            }
+
+            let _ = unsafe { libc::close(sock) };
+        },
+        |context| {
+            if let Some(proxy) = context.network {
+                coordinator.set_network_proxy(proxy);
+            }
+            coordinator.compute_full_delta(context.child_pid, None)
+        },
+    )
+    .expect("Process boundary execution failed");
+
+    assert_eq!(
+        exit_status,
+        BoundaryExitStatus::Exited(0),
+        "Isolated execution layer failed to complete the network boundary handshake"
+    );
+
+    let delta = inspected
+        .expect("Inspection closure did not execute against the live boundary")
+        .expect("Delta computation failed");
+
+    assert_eq!(
+        delta.network_mutations.len(),
+        1,
+        "Expected exactly 1 intercepted network mutation, found {}",
+        delta.network_mutations.len()
+    );
+
+    let mutation = &delta.network_mutations[0];
+    assert_eq!(mutation.method, "POST");
+    assert_eq!(mutation.url, "/v1/charges");
+    assert_eq!(mutation.request_body, b"{}".to_vec());
+    assert_eq!(mutation.response_status, 200);
+    assert_eq!(
+        mutation.response_body,
+        b"{\"id\":\"ch_mock_9988\"}".to_vec()
     );
 }
