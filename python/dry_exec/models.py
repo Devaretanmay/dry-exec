@@ -1,7 +1,40 @@
 """Type-safe models representing deterministic state deltas in Python."""
 
+from enum import Enum
 from typing import Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class Choice(str, Enum):
+    """Categorical validation of a state delta against environment rules."""
+
+    ALLOWED = "allowed"
+    BLOCKED = "blocked"
+    VIOLATED = "violated"
+
+
+class Noul(str, Enum):
+    """Escalation state routed from the System-One decision layer."""
+
+    AUTO_COMMIT = "auto_commit"
+    ESCALATE = "escalate"
+
+
+class DecisionReceipt(BaseModel):
+    """Deterministic System-One decision receipt for a single state delta."""
+
+    model_config = ConfigDict(frozen=True)
+
+    choice: Choice = Field(description="Categorical validation outcome")
+    risk_score: float = Field(
+        ge=0.0, le=1.0, description="Calibrated risk metric in [0.0, 1.0]"
+    )
+    noul_trigger: Noul = Field(
+        description="Escalation routing for the autonomous execution loop"
+    )
+    reason: str = Field(
+        description="Interpolated system reason emitted by the decision layer"
+    )
 
 
 class ByteDelta(BaseModel):
@@ -82,7 +115,15 @@ class StateDelta(BaseModel):
         default_factory=list,
         description="Outbound network mutations intercepted by the transparent proxy",
     )
+    schema_breaches: int = Field(
+        default=0,
+        description="Intercepted routes the transparent proxy refused outside the schema",
+    )
     total_bytes_mutated: int = Field(description="Aggregate count of mutated bytes")
     duration_nanos: int = Field(
         description="State delta computation latency in nanoseconds"
+    )
+    decision: Optional[DecisionReceipt] = Field(
+        default=None,
+        description="System-One decision receipt routed from the execution layer",
     )

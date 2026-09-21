@@ -222,3 +222,33 @@ Scope: Ephemeral execution boundary isolating process namespaces and syscall int
 
 
 
+
+- [x] G46: Rust decision module implements Choice, Score, and Noul primitives.
+  CHECK: grep -qE "pub enum Choice" crates/dry-exec-core/src/decision/primitives.rs && grep -qE "pub struct Score" crates/dry-exec-core/src/decision/primitives.rs && grep -qE "pub enum Noul" crates/dry-exec-core/src/decision/primitives.rs && grep -qE "pub struct DecisionReceipt" crates/dry-exec-core/src/decision/primitives.rs && echo "system-one-primitives-implemented"
+  EXPECT: /system-one-primitives-implemented/
+  EVIDENCE: system-one-primitives-implemented
+
+- [x] G47: evaluate() function computes DecisionReceipt in O(1) time without iterating over raw mutation vectors.
+  CHECK: grep -q "pub fn evaluate(summary: &DeltaSummary, environment: &Environment) -> DecisionReceipt" crates/dry-exec-core/src/decision/mod.rs && grep -q "pub struct DeltaSummary" crates/dry-exec-core/src/decision/environment.rs && ! sed '/^#\[cfg(test)\]/,$d' crates/dry-exec-core/src/decision/mod.rs | grep -qE "memory_mutations|fs_mutations|network_mutations" && echo "system-one-o1-routing-enforced"
+  EXPECT: /system-one-o1-routing-enforced/
+  EVIDENCE: system-one-o1-routing-enforced
+
+- [x] G48: Python SDK exposes DecisionReceipt Pydantic model and raises DecisionEscalationError on Noul::Escalate.
+  CHECK: PYTHONPATH=python python3 -m pytest tests/test_decision.py -q -k "receipt or escalation" >/dev/null && echo "system-one-sdk-escalation-verified"
+  EXPECT: /system-one-sdk-escalation-verified/
+  EVIDENCE: system-one-sdk-escalation-verified
+
+- [x] G49: dex CLI intercepts Escalate status and blocks auto-commit unless --commit is explicitly passed.
+  CHECK: docker run --rm --privileged -v "$PWD":/workspace -w /workspace dry-exec-test-harness bash -c 'maturin develop -q >/dev/null 2>&1; python -m pytest tests/test_decision.py -k test_cli_ 2>&1 | tail -2'
+  EXPECT: /3 passed/
+  EVIDENCE: ======================= 3 passed, 14 deselected in 0.07s =======================
+
+- [x] G50: Benchmark proves evaluate() execution takes < 0.1ms for a 100MB StateDelta.
+  CHECK: cargo test --lib -p dry-exec-core decision::tests::test_decision_latency >/dev/null 2>&1 && echo "system-one-latency-bound-verified"
+  EXPECT: /system-one-latency-bound-verified/
+  EVIDENCE: system-one-latency-bound-verified
+
+- [x] G51: Linguistic audit passes with 0 banned terms across the Loop 13 decision surface; the permitted type-safe phrasing is exempt.
+  CHECK: ! grep -rniE "\b(policy|policies|guardian|guardrail|guardrails|shield|secure|security|slop)\b|AI agent|(^|[^-])safe(ly)?\b" crates/dry-exec-core/src/decision/ python/dry_exec/decision.py docs/architecture/loop13-decision-layer-design.md tests/test_decision.py && echo "loop13-linguistic-audit-clean"
+  EXPECT: /loop13-linguistic-audit-clean/
+  EVIDENCE: loop13-linguistic-audit-clean

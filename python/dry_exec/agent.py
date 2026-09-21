@@ -4,7 +4,13 @@ import json
 import os
 from typing import Any, Callable, Dict, List, Optional
 from dry_exec.client import DryExecClient
-from dry_exec.exceptions import DryExecError, SchemaViolationError, SyscallBoundaryError
+from dry_exec.decision import is_escalated
+from dry_exec.exceptions import (
+    DecisionEscalationError,
+    DryExecError,
+    SchemaViolationError,
+    SyscallBoundaryError,
+)
 from dry_exec.models import StateDelta
 from dry_exec.observability import DeltaLogger
 from dry_exec.schemas import Action, Environment
@@ -86,8 +92,13 @@ class Agent:
         self,
         task: Optional[str] = None,
         auto_commit: bool = True,
+        force: bool = False,
     ) -> AgentExecutionResult:
-        """Executes the autonomous loop: propose -> dry-run -> evaluate delta -> self-correct / commit."""
+        """Executes the autonomous loop: propose -> dry-run -> evaluate receipt -> self-correct / commit.
+
+        A receipt routed to escalation halts the loop and raises DecisionEscalationError unless
+        force=True, which is the programmatic equivalent of the CLI's explicit --commit.
+        """
         active_task = task or self.task
         if not active_task:
             raise ValueError(
@@ -136,6 +147,16 @@ class Agent:
                     self.environment, action
                 )
                 self.logger.render_delta(delta, trial_id=trial)
+                self.logger.render_decision(delta.decision)
+
+                # System-One routing: escalation halts the loop unless the commit is forced
+                if is_escalated(delta.decision) and not force:
+                    raise DecisionEscalationError(
+                        message=delta.decision.reason,
+                        risk_score=delta.decision.risk_score,
+                        reason=delta.decision.reason,
+                        choice=delta.decision.choice.value,
+                    )
 
                 if auto_commit:
                     self.logger.render_commit_prompt(confirmed=True)
@@ -184,6 +205,11 @@ class Agent:
                         "content": f"Execution failed: {err_msg}. Adjust control flow without invoking restricted syscalls.",
                     }
                 )
+
+            except DecisionEscalationError:
+                # Escalation is terminal for the loop: it is not a boundary breach that
+                # self-correction can resolve, so it must not be absorbed as a boundary error.
+                raise
 
             except DryExecError as dee:
                 err_msg = f"Boundary error: {dee}"

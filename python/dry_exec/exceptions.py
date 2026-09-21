@@ -48,3 +48,23 @@ class StateDeltaComputationError(DryExecError):
     """Raised when the state delta engine encounters an error inspecting memory or ephemeral filesystem state."""
 
     pass
+
+
+class DecisionEscalationError(DryExecError):
+    """Raised when the System-One decision layer routes a state delta to escalation.
+
+    Carries the calibrated risk metric, categorical choice, and interpolated system reason so the
+    autonomous execution loop and the CLI can surface the routing without re-deriving it.
+    """
+
+    def __init__(self, message: str, risk_score: float, reason: str, choice: str):
+        super().__init__(message)
+        self.risk_score = risk_score
+        self.reason = reason
+        self.choice = choice
+
+    def __repr__(self) -> str:
+        return (
+            f"DecisionEscalationError(choice={self.choice}, "
+            f"risk_score={self.risk_score:.2f})"
+        )

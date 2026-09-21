@@ -62,6 +62,22 @@ class Environment(BaseModel):
         default=64 * 1024 * 1024,
         description="Upper memory allocation boundary in bytes",
     )
+    max_mutated_bytes: int = Field(
+        default=1_048_576,
+        gt=0,
+        description="Calibrated mutation volume ceiling driving the risk score byte term",
+    )
+    max_network_calls: int = Field(
+        default=16,
+        gt=0,
+        description="Calibrated intercepted call ceiling driving the risk score network term",
+    )
+    max_risk_threshold: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Calibrated risk ceiling; a score above it requires escalation",
+    )
 
     def validate_action(self, action: Action) -> None:
         """Enforces synchronous schema validation before crossing the FFI boundary.

@@ -9,7 +9,13 @@ from typing import Callable, Optional, Set, Union
 
 from dry_exec.agent import Agent, AgentExecutionResult, DryExecAgent
 from dry_exec.client import DryExecClient
+from dry_exec.decision import (
+    enforce_escalation,
+    is_escalated,
+    parse_decision,
+)
 from dry_exec.exceptions import (
+    DecisionEscalationError,
     DryExecError,
     IsolationSetupError,
     SchemaViolationError,
@@ -18,8 +24,11 @@ from dry_exec.exceptions import (
 )
 from dry_exec.models import (
     ByteDelta,
+    Choice,
+    DecisionReceipt,
     FsMutation,
     InterceptedRequest,
+    Noul,
     PageMutation,
     StateDelta,
 )
@@ -80,6 +89,8 @@ def dry_run(
                     },
                 )
                 delta = await exec_client.execute_ephemeral_action(target_env, action)
+                # System-One escalation gate: escalation clears only through an explicit commit
+                enforce_escalation(delta.decision, force=commit)
                 if commit:
                     await fn(*args, **kwargs)
                 return delta
@@ -101,6 +112,8 @@ def dry_run(
                 delta = _exec_coro_safely(
                     exec_client.execute_ephemeral_action(target_env, action)
                 )
+                # System-One escalation gate: escalation clears only through an explicit commit
+                enforce_escalation(delta.decision, force=commit)
                 if commit:
                     fn(*args, **kwargs)
                 return delta
@@ -137,6 +150,8 @@ def run(
         delta = _exec_coro_safely(
             exec_client.execute_ephemeral_action(target_env, action)
         )
+        # System-One escalation gate: escalation clears only through an explicit commit
+        enforce_escalation(delta.decision, force=commit)
         if commit:
             import subprocess
 
@@ -168,6 +183,12 @@ __all__ = [
     "ByteDelta",
     "FsMutation",
     "InterceptedRequest",
+    "Choice",
+    "Noul",
+    "DecisionReceipt",
+    "is_escalated",
+    "parse_decision",
+    "enforce_escalation",
     "DeltaLogger",
     "TelemetryExporter",
     "DryExecError",
@@ -175,4 +196,5 @@ __all__ = [
     "SyscallBoundaryError",
     "IsolationSetupError",
     "StateDeltaComputationError",
+    "DecisionEscalationError",
 ]

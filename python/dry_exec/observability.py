@@ -6,10 +6,18 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
-from dry_exec.exceptions import SchemaViolationError, SyscallBoundaryError
-from dry_exec.models import StateDelta
+from dry_exec.decision import is_escalated
+from dry_exec.exceptions import (
+    DecisionEscalationError,
+    SchemaViolationError,
+    SyscallBoundaryError,
+)
+from dry_exec.models import DecisionReceipt, StateDelta
 from dry_exec.schemas import Action, Environment
 from dry_exec.telemetry import TelemetryExporter
+
+# Guidance rendered whenever the System-One decision layer routes a state delta to escalation.
+_FORCE_COMMIT_GUIDANCE = "Escalation required. Re-run with --commit to force."
 
 
 class DeltaLogger:
@@ -169,6 +177,39 @@ class DeltaLogger:
                 )
             )
 
+    def render_decision(self, receipt: Optional[DecisionReceipt]) -> None:
+        """Render the System-One decision receipt: categorical choice, calibrated score, and escalation state."""
+        if receipt is None:
+            return
+
+        escalated = is_escalated(receipt)
+        table = Table(box=ROUNDED, show_header=False, expand=True)
+        table.add_column("Key", style="bold cyan", width=22)
+        table.add_column("Value", style="white")
+
+        table.add_row("Decision Choice", receipt.choice.value)
+        table.add_row(
+            "Risk Score",
+            f"{receipt.risk_score:.2f} [dim](calibrated range 0.00 - 1.00)[/dim]",
+        )
+        table.add_row("Escalation", "Required" if escalated else "Auto-commit")
+        table.add_row("System Reason", receipt.reason)
+        if escalated:
+            table.add_row("", f"[bold red]{_FORCE_COMMIT_GUIDANCE}[/bold red]")
+
+        self.console.print(
+            Panel(
+                table,
+                title=(
+                    "[bold red]System-One Decision: Escalation Required[/bold red]"
+                    if escalated
+                    else "[bold green]System-One Decision Receipt[/bold green]"
+                ),
+                subtitle="[dim]Deterministic routing over calibrated scalar metrics[/dim]",
+                border_style="red" if escalated else "green",
+            )
+        )
+
     def render_error(self, error: Exception, trial_id: int = 1) -> None:
         """Alias for render_violation with optional trial_id for multi-trial loops."""
         self.render_violation(error)
@@ -214,6 +255,23 @@ class DeltaLogger:
                 Panel(
                     text,
                     title="[bold red]Schema Boundary Violation[/bold red]",
+                    border_style="red",
+                )
+            )
+        elif isinstance(error, DecisionEscalationError):
+            text = Text()
+            text.append("System-One Escalation Required\n", style="bold red")
+            text.append(f"Decision Choice: {error.choice}\n", style="yellow")
+            text.append(f"Risk Score: {error.risk_score:.2f}\n", style="yellow")
+            text.append(f"System Reason: {error.reason}\n", style="cyan")
+            text.append(
+                f"{_FORCE_COMMIT_GUIDANCE} The state delta is not auto-committed.",
+                style="dim",
+            )
+            self.console.print(
+                Panel(
+                    text,
+                    title="[bold red]Decision Escalation[/bold red]",
                     border_style="red",
                 )
             )

@@ -26,3 +26,8 @@ echo " Phase 5: Running Production-Ready Examples (Loop 7)..."
 echo "================================================================="
 pytest -v tests/test_examples.py
 
+echo "================================================================="
+echo " Phase 6: Running System-One Decision Layer Suite (Loop 13)..."
+echo "================================================================="
+pytest -v tests/test_decision.py
+

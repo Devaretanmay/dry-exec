@@ -58,6 +58,9 @@ pub struct StateDelta {
     pub fs_mutations: Vec<FsMutation>,
     /// Outbound network mutations intercepted by the transparent proxy.
     pub network_mutations: Vec<InterceptedRequest>,
+    /// Count of intercepted routes the transparent proxy refused outside the registered schema.
+    /// Precomputed here so the decision layer can route a categorical refusal from a scalar.
+    pub schema_breaches: usize,
     /// Total count of mutated bytes across memory and filesystem.
     pub total_bytes_mutated: usize,
     /// State delta computation duration in nanoseconds.

@@ -10,7 +10,8 @@ import typer
 import yaml
 from rich.console import Console
 from dry_exec.client import DryExecClient
-from dry_exec.exceptions import DryExecError
+from dry_exec.decision import is_escalated
+from dry_exec.exceptions import DecisionEscalationError, DryExecError
 from dry_exec.observability import DeltaLogger
 from dry_exec.schemas import Action, Environment, MockResponse
 
@@ -129,6 +130,11 @@ def _execute_cli_flow(
     try:
         delta = asyncio.run(_execute())
         logger.render_delta(delta)
+        logger.render_decision(delta.decision)
+
+        # System-One escalation gate: escalation clears only through an explicit --commit
+        if is_escalated(delta.decision) and not auto_commit:
+            raise typer.Exit(code=4)
 
         # Human-in-the-loop control flow checkpoint
         if auto_commit:
@@ -145,6 +151,9 @@ def _execute_cli_flow(
         else:
             raise typer.Exit(code=0)
 
+    except DecisionEscalationError as exc:
+        logger.render_violation(exc)
+        raise typer.Exit(code=4)
     except DryExecError as exc:
         logger.render_violation(exc)
         raise typer.Exit(code=2)

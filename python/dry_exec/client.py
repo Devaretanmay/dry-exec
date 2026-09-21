@@ -2,6 +2,7 @@
 
 import asyncio
 from typing import Any, Dict, Optional, Tuple
+from dry_exec.decision import parse_decision
 from dry_exec.exceptions import (
     IsolationSetupError,
     StateDeltaComputationError,
@@ -113,6 +114,19 @@ class DryExecClient:
                 span.set_attribute(
                     "dry_exec.delta.network_requests", len(delta.network_mutations)
                 )
+                span.set_attribute(
+                    "dry_exec.delta.schema_breaches", delta.schema_breaches
+                )
+                if delta.decision is not None:
+                    span.set_attribute(
+                        "dry_exec.decision.choice", delta.decision.choice.value
+                    )
+                    span.set_attribute(
+                        "dry_exec.decision.noul", delta.decision.noul_trigger.value
+                    )
+                    span.set_attribute(
+                        "dry_exec.decision.risk_score", delta.decision.risk_score
+                    )
             return delta
 
     async def _execute_internal(
@@ -156,6 +170,14 @@ class DryExecClient:
             else "/tmp/dry_exec_ephemeral"
         )
 
+        # Calibrated thresholds evaluated by the Rust System-One decision layer in the same
+        # crossing that produces the state delta.
+        decision_thresholds = (
+            environment.max_mutated_bytes,
+            environment.max_network_calls,
+            environment.max_risk_threshold,
+        )
+
         # 3. Asynchronously dispatch blocking kernel operations to maintain event loop liveness
         try:
             raw_delta: Dict[str, Any] = await asyncio.to_thread(
@@ -166,6 +188,7 @@ class DryExecClient:
                 trigger_blocked_syscall,
                 mock_endpoints_tuples,
                 request_to_trigger,
+                decision_thresholds,
             )
         except Exception as exc:
             exc_type = type(exc).__name__
@@ -229,6 +252,8 @@ class DryExecClient:
             memory_mutations=memory_mutations,
             fs_mutations=fs_mutations,
             network_mutations=network_mutations,
+            schema_breaches=raw_delta.get("schema_breaches", 0),
             total_bytes_mutated=raw_delta.get("total_bytes_mutated", 0),
             duration_nanos=raw_delta.get("duration_nanos", 0),
+            decision=parse_decision(raw_delta.get("decision")),
         )

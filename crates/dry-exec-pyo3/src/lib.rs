@@ -21,7 +21,10 @@ create_exception!(_dry_exec_ffi, SyscallBoundaryError, PyException);
 create_exception!(_dry_exec_ffi, StateDeltaComputationError, PyException);
 
 #[pyfunction]
-#[pyo3(signature = (action_json, memory_size, tmpfs_path, trigger_blocked_syscall, mock_endpoints=None, request_to_trigger=None))]
+// The FFI boundary stays positional: each argument is a distinct facet of the ephemeral
+// execution request, and bundling them would complicate every Python caller for no gain.
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (action_json, memory_size, tmpfs_path, trigger_blocked_syscall, mock_endpoints=None, request_to_trigger=None, decision_thresholds=None))]
 fn execute_isolated_action(
     py: Python<'_>,
     action_json: String,
@@ -30,7 +33,9 @@ fn execute_isolated_action(
     trigger_blocked_syscall: bool,
     mock_endpoints: Option<Vec<MockEndpoint>>,
     request_to_trigger: Option<(String, String, String)>,
+    decision_thresholds: Option<(usize, usize, f32)>,
 ) -> PyResult<PyObject> {
+    use dry_exec_core::decision::{evaluate, DeltaSummary, Environment};
     #[cfg(target_os = "linux")]
     use dry_exec_core::delta::AnonymousMemoryRegion;
     use dry_exec_core::delta::{DeltaCoordinator, MockResponse, NetworkMockSchema};
@@ -292,8 +297,22 @@ fn execute_isolated_action(
 
     match result {
         Ok(delta) => {
+            // System-One decision layer: the receipt is computed from the scalar summary of the
+            // state delta and the calibrated thresholds, in this single FFI crossing.
+            let decision_environment = decision_thresholds
+                .map(
+                    |(max_mutated_bytes, max_network_calls, max_risk_threshold)| Environment {
+                        max_mutated_bytes,
+                        max_network_calls,
+                        max_risk_threshold,
+                    },
+                )
+                .unwrap_or_default();
+            let receipt = evaluate(&DeltaSummary::from(&delta), &decision_environment);
+
             let dict = PyDict::new(py);
             dict.set_item("total_bytes_mutated", delta.total_bytes_mutated)?;
+            dict.set_item("schema_breaches", delta.schema_breaches)?;
             dict.set_item("duration_nanos", delta.duration_nanos)?;
 
             let mem_list = PyList::empty(py);
@@ -354,6 +373,13 @@ fn execute_isolated_action(
                 net_list.append(net_dict)?;
             }
             dict.set_item("network_mutations", net_list)?;
+
+            let decision_dict = PyDict::new(py);
+            decision_dict.set_item("choice", receipt.choice.as_str())?;
+            decision_dict.set_item("risk_score", receipt.risk_score.value())?;
+            decision_dict.set_item("noul_trigger", receipt.noul_trigger.as_str())?;
+            decision_dict.set_item("reason", receipt.reason)?;
+            dict.set_item("decision", decision_dict)?;
 
             Ok(dict.into())
         }

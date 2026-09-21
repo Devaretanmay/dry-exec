@@ -19,3 +19,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 name = "delta_bench"
 harness = false
 
+[[bench]]
+name = "decision_bench"
+harness = false
+

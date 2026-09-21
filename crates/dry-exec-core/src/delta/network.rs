@@ -5,7 +5,7 @@ use crate::error::DeltaError;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
@@ -80,6 +80,7 @@ pub struct TransparentProxy {
     port: u16,
     is_running: Arc<AtomicBool>,
     intercepted: Arc<Mutex<Vec<InterceptedRequest>>>,
+    schema_breaches: Arc<AtomicUsize>,
     server_thread: Option<JoinHandle<()>>,
 }
 
@@ -107,6 +108,8 @@ impl TransparentProxy {
         let running_clone = is_running.clone();
         let intercepted = Arc::new(Mutex::new(Vec::new()));
         let intercepted_clone = intercepted.clone();
+        let schema_breaches = Arc::new(AtomicUsize::new(0));
+        let schema_breaches_clone = schema_breaches.clone();
 
         // Poll the listener so the serving thread observes shutdown without depending on a
         // wake-up connection, which cannot reach a listener bound in another network namespace.
@@ -120,7 +123,12 @@ impl TransparentProxy {
                 match listener.accept() {
                     Ok((stream, _)) => {
                         let _ = stream.set_nonblocking(false);
-                        handle_connection(stream, &schema, &intercepted_clone);
+                        handle_connection(
+                            stream,
+                            &schema,
+                            &intercepted_clone,
+                            &schema_breaches_clone,
+                        );
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(2));
@@ -136,6 +144,7 @@ impl TransparentProxy {
             port,
             is_running,
             intercepted,
+            schema_breaches,
             server_thread: Some(server_thread),
         })
     }
@@ -154,6 +163,11 @@ impl TransparentProxy {
     pub fn drain_intercepted(&self) -> Vec<InterceptedRequest> {
         let mut guard = self.intercepted.lock().unwrap();
         std::mem::take(&mut *guard)
+    }
+
+    /// Count of routes refused outside the registered schema, as a scalar summary metric.
+    pub fn schema_breaches(&self) -> usize {
+        self.schema_breaches.load(Ordering::Relaxed)
     }
 }
 
@@ -220,6 +234,7 @@ fn handle_connection(
     mut stream: TcpStream,
     schema: &NetworkMockSchema,
     intercepted: &Arc<Mutex<Vec<InterceptedRequest>>>,
+    schema_breaches: &Arc<AtomicUsize>,
 ) {
     // Enforce 500ms timeout bound on connection operations
     let timeout = Some(Duration::from_millis(500));
@@ -270,6 +285,7 @@ fn handle_connection(
         Some(mock) => (mock.status_code, mock.headers.clone(), mock.body.clone()),
         None => {
             // Unregistered route rejected at boundary
+            schema_breaches.fetch_add(1, Ordering::Relaxed);
             let mut h = HashMap::new();
             h.insert("Content-Type".to_string(), "application/json".to_string());
             (

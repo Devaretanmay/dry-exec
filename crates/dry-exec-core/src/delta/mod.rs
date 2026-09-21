@@ -116,6 +116,13 @@ impl DeltaCoordinator {
             Vec::new()
         };
 
+        // 3b. Collect the refused-route scalar, which drives categorical decision routing
+        let schema_breaches = self
+            .network_proxy
+            .as_ref()
+            .map(|proxy| proxy.schema_breaches())
+            .unwrap_or(0);
+
         // 4. Aggregate total bytes mutated
         let mut total_bytes = 0;
         for page in &memory_mutations {
@@ -144,6 +151,7 @@ impl DeltaCoordinator {
             memory_mutations,
             fs_mutations,
             network_mutations,
+            schema_breaches,
             total_bytes_mutated: total_bytes,
             duration_nanos,
         })
@@ -171,6 +179,12 @@ impl DeltaCoordinator {
             Vec::new()
         };
 
+        let schema_breaches = self
+            .network_proxy
+            .as_ref()
+            .map(|proxy| proxy.schema_breaches())
+            .unwrap_or(0);
+
         let mut total_bytes = 0;
         for fs_mut in &fs_mutations {
             match fs_mut {
@@ -193,6 +207,7 @@ impl DeltaCoordinator {
             memory_mutations: Vec::new(),
             fs_mutations,
             network_mutations,
+            schema_breaches,
             total_bytes_mutated: total_bytes,
             duration_nanos,
         })
