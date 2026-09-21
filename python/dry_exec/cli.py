@@ -15,11 +15,12 @@ from dry_exec.observability import DeltaLogger
 from dry_exec.schemas import Action, Environment, MockResponse
 
 app = typer.Typer(
-    name="de",
+    name="dex",
     help="Deterministic ephemeral execution primitive for autonomous execution loops.",
     no_args_is_help=True,
     add_completion=False,
 )
+
 console = Console()
 logger = DeltaLogger(console)
 
@@ -173,14 +174,15 @@ def main_callback(
         return
 
     if command is None and config is None and action is None:
-        console.print("[bold green]de[/bold green] (dry-exec) - Ephemeral kernel execution primitive\n")
-        console.print("Usage: de [OPTIONS] COMMAND")
-        console.print("       de run [--config ... --action ...]")
-        console.print("       de inspect --config ...\n")
+        console.print("[bold green]dex[/bold green] (dry-exec) - Ephemeral kernel execution primitive\n")
+        console.print("Usage: dex [OPTIONS] COMMAND")
+        console.print("       dex run [--config ... --action ...]")
+        console.print("       dex inspect --config ...\n")
         console.print("Examples:")
-        console.print('  de "python migrate.py"')
-        console.print('  de --commit "npm run seed"')
-        console.print('  de run --config env.yaml --action action.yaml\n')
+        console.print('  dex "python migrate.py"')
+        console.print('  dex --commit "npm run seed"')
+        console.print('  dex run --config env.yaml --action action.yaml\n')
+        console.print("[dim]Aliases: 'de', 'dry-exec'[/dim]\n")
         return
 
     _execute_cli_flow(
@@ -250,10 +252,11 @@ def inspect(
 
 @app.command()
 def version() -> None:
-    """Display de (dry-exec) version and kernel primitive capabilities."""
-    console.print("[bold green]de[/bold green] (dry-exec) v1.0.0")
+    """Display dex (dry-exec) version and kernel primitive capabilities."""
+    console.print("[bold green]dex[/bold green] (dry-exec) v1.0.0")
     console.print("Architecture: Ephemeral Kernel Isolation & State Delta Engine")
     console.print("Primitives: Linux Namespaces, Seccomp-BPF TRAP, Soft-Dirty Pagemap, Transparent Network Proxy, macOS Seatbelt & APFS CoW")
+
 
 
 def main() -> None:

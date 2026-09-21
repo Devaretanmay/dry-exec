@@ -44,19 +44,43 @@ pip install dry-exec
 
 ## Quickstart
 
-### Path 1: The `de` CLI (Direct Command Execution)
+### Path 1: The `dex` CLI (Direct Command Execution)
 
-Like GitHub's `gh` command, `dry-exec` provides the punchy **`de`** CLI shortcut (with `dex` and `dry-exec` available as aliases). Run any command directly in an ephemeral sandbox without YAML or Docker:
+Run any command directly in an ephemeral sandbox without YAML or Docker (`de` and `dry-exec` also supported as aliases):
 
 ```bash
 # Dry-run: inspect the state delta without modifying host
-de "python migrate.py"
+dex "python migrate.py"
 
 # Commit changes only if the dry-run delta looks right
-de --commit "npm run seed"
+dex --commit "npm run seed"
 
 # Inspect active environment limits and boundary rules
-de inspect --config env.yaml
+dex inspect --config env.yaml
+```
+
+```
+$ dex "python dangerous_script.py"
+
+╭──────────────── Ephemeral State Exploration: Proposed Action ────────────────╮
+│ Environment     cli_ephemeral_sandbox                                        │
+│ Action ID       cmd_7f2b1a                                                   │
+│ Target Resource shell_command                                                │
+│ Mutation Type   execute                                                      │
+│ Payload         {'command': 'python dangerous_script.py'}                    │
+╰──────────────────── Pre-Execution Boundary Verification ─────────────────────╯
+╭─────────────────────── State Delta Receipt (Trial #1) ───────────────────────╮
+│ Metric                           Count / Value                               │
+│ ──────────────────────────────────────────────────────────────────────────── │
+│ Memory Pages Mutated             N/A (macOS bare-metal; Linux pagemap only)  │
+│ Filesystem Changes               3 inodes (APFS CoW snapshot)                │
+│ Network Requests Intercepted     1 request intercepted (Stripe mock proxy)   │
+│ Total Mutated Bytes              4,096 bytes                                 │
+│ Computation Latency              0.320 ms (sub-millisecond native kernel)    │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+Commit state delta to target environment? [y/N]: n
+[Real host and live APIs remain untouched.]
 ```
 
 <br>
@@ -82,6 +106,7 @@ Or execute directly with functional `dry_exec.run()`:
 ```python
 delta = dry_exec.run("python seed_data.py")
 ```
+
 
 <br>
 
@@ -129,7 +154,7 @@ asyncio.run(main())
   │  Async FFI dispatch (GIL released)           │
   │  Structured telemetry + OTel spans           │
   └──────────────┬───────────────────────────────┘
-                 │ PyO3 FFI / `de` CLI
+                 │ PyO3 FFI / `dex` CLI
                  ▼
   Rust Control Plane (Linux & macOS Router)
   ┌──────────────────────────────────────────────┐
@@ -146,10 +171,11 @@ asyncio.run(main())
 
 ## Features
 
-- **Punchy `de` CLI (like `gh` for GitHub)** — Run any command ephemerally without configuration files or Docker (`dex` and `dry-exec` aliases supported)
+- **Direct `dex` CLI** — Run any command ephemerally without configuration files or Docker (`de` and `dry-exec` aliases supported)
 - **`@dry_exec.dry_run` decorator** — Zero boilerplate ephemeral execution for Python functions
 - **3-line agent loop** — Propose → dry-run → evaluate → self-correct → commit
 - **Native macOS support** — Kernel-level Seatbelt MAC sandboxing and APFS `clonefile` hardware CoW
+
 - **Kernel-level Linux isolation** — Linux namespaces (PID, NET, MNT, IPC, UTS) with seccomp-BPF filtering
 - **$O(P_{\text{dirty}})$ state diffing** — Soft-dirty pagemap tracking, no app-level hashing
 - **Transparent network proxy** — Schema-driven mock responses, zero external egress

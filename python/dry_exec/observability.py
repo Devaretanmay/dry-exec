@@ -53,14 +53,21 @@ class DeltaLogger:
         summary_table.add_column("Metric", style="bold green")
         summary_table.add_column("Count / Value", style="white")
 
-        summary_table.add_row("Memory Pages Mutated", str(len(delta.memory_mutations)))
+        import sys
+
+        if sys.platform == "darwin":
+            summary_table.add_row("Memory Pages Mutated", "N/A [dim yellow](macOS bare-metal; Linux pagemap only)[/dim yellow]")
+        else:
+            summary_table.add_row("Memory Pages Mutated", str(len(delta.memory_mutations)))
         summary_table.add_row("Filesystem Changes", str(len(delta.fs_mutations)))
         summary_table.add_row("Network Requests Intercepted", str(len(delta.network_mutations)))
         summary_table.add_row("Total Mutated Bytes", f"{delta.total_bytes_mutated:,} bytes")
+        scan_backend = "APFS clonefile" if sys.platform == "darwin" else "kernel O(P_dirty) scan"
         summary_table.add_row(
             "Computation Latency",
-            f"{delta.duration_nanos / 1_000_000:.3f} ms (kernel O(P_dirty) scan)",
+            f"{delta.duration_nanos / 1_000_000:.3f} ms ({scan_backend})",
         )
+
 
         self.console.print(
             Panel(
@@ -69,6 +76,12 @@ class DeltaLogger:
                 border_style="green",
             )
         )
+        if sys.platform == "darwin":
+            self.console.print(
+                "[dim]Note: Memory page tracking uses Linux /proc/[pid]/pagemap. "
+                "Filesystem mutations (APFS CoW) and network proxy requests are fully tracked on macOS.[/dim]"
+            )
+
 
         # 2. Memory Mutations Breakdown
         if delta.memory_mutations:
