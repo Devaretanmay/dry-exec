@@ -31,45 +31,53 @@ def fallback_ffi_if_host_non_linux(monkeypatch):
 
 
 def test_dex_dry_run_sync_decorator():
-    """Verify @dex.dry_run decorator wraps synchronous function execution."""
-    @dex.dry_run
+    """Verify @dry_exec.dry_run decorator wraps synchronous function execution."""
+    import dry_exec
+
+    @dry_exec.dry_run
     def update_balance(amount: int):
         return {"new_balance": amount}
 
     delta = update_balance(100)
-    assert isinstance(delta, dex.StateDelta)
+    assert isinstance(delta, dry_exec.StateDelta)
     assert delta.total_bytes_mutated >= 0
     assert delta.duration_nanos > 0
 
 
 @pytest.mark.asyncio
 async def test_dex_dry_run_async_decorator():
-    """Verify @dex.dry_run decorator wraps asynchronous coroutine execution."""
-    @dex.dry_run
+    """Verify @dry_exec.dry_run decorator wraps asynchronous coroutine execution."""
+    import dry_exec
+
+    @dry_exec.dry_run
     async def async_mutation(key: str, val: str):
         return {key: val}
 
     delta = await async_mutation("status", "active")
-    assert isinstance(delta, dex.StateDelta)
+    assert isinstance(delta, dry_exec.StateDelta)
     assert delta.total_bytes_mutated >= 0
     assert delta.duration_nanos > 0
 
 
 def test_dex_run_functional_callable():
-    """Verify dex.run functional helper on callable."""
+    """Verify dry_exec.run functional helper on callable."""
+    import dry_exec
+
     def test_op(x, y):
         return x + y
 
-    delta = dex.run(test_op, 10, 20)
-    assert isinstance(delta, dex.StateDelta)
+    delta = dry_exec.run(test_op, 10, 20)
+    assert isinstance(delta, dry_exec.StateDelta)
     assert delta.total_bytes_mutated >= 0
     assert delta.duration_nanos > 0
 
 
 def test_dex_run_command_string():
-    """Verify dex.run functional helper on direct shell command."""
-    delta = dex.run("echo 'ephemeral testing'")
-    assert isinstance(delta, dex.StateDelta)
+    """Verify dry_exec.run functional helper on direct shell command."""
+    import dry_exec
+
+    delta = dry_exec.run("echo 'ephemeral testing'")
+    assert isinstance(delta, dry_exec.StateDelta)
     assert delta.total_bytes_mutated >= 0
     assert delta.duration_nanos > 0
 
@@ -77,7 +85,9 @@ def test_dex_run_command_string():
 @pytest.mark.asyncio
 async def test_dex_agent_three_line():
     """Verify 3-line Agent initialization and autonomous loop execution."""
-    agent = dex.Agent(task="Migrate customer records to v2 schema")
+    from dry_exec import Agent
+
+    agent = Agent(task="Migrate customer records to v2 schema")
     result = await agent.run()
 
     assert result.success is True
@@ -86,11 +96,11 @@ async def test_dex_agent_three_line():
     assert result.final_delta is not None
 
 
-def test_dex_cli_direct_command():
-    """Verify dex CLI direct command execution without YAML configuration."""
+def test_de_cli_direct_command():
+    """Verify 'de' CLI direct command execution without YAML configuration."""
     typer = pytest.importorskip("typer")
     from typer.testing import CliRunner
-    from dex.cli import app
+    from dry_exec.cli import app
 
     runner = CliRunner()
     result = runner.invoke(app, ["echo 'hello world'", "--commit"])
@@ -98,14 +108,24 @@ def test_dex_cli_direct_command():
     assert "State Delta Receipt" in result.stdout or "Ephemeral State Exploration" in result.stdout
 
 
-def test_dex_cli_version():
-    """Verify dex version output."""
+def test_de_cli_version():
+    """Verify 'de' version output."""
     typer = pytest.importorskip("typer")
     from typer.testing import CliRunner
-    from dex.cli import app
+    from dry_exec.cli import app
 
     runner = CliRunner()
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
-    assert "dex" in result.stdout
+    assert "de" in result.stdout
     assert "dry-exec" in result.stdout
+
+
+def test_dex_compat_shim():
+    """Verify dex module functions as backward compatibility shim for dry_exec."""
+    import dex
+    assert hasattr(dex, "Agent")
+    assert hasattr(dex, "dry_run")
+    assert hasattr(dex, "run")
+    assert hasattr(dex, "StateDelta")
+

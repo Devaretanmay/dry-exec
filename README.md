@@ -1,8 +1,8 @@
 <div align="center">
 
-# dex (dry-exec)
+# dry-exec
 
-**Ephemeral kernel-level execution for autonomous loops.**
+**Deterministic ephemeral execution primitive for autonomous loops.**
 
 Explore state mutations without consequences. Commit only what you approve.
 
@@ -16,15 +16,15 @@ Explore state mutations without consequences. Commit only what you approve.
 
 ---
 
-## What is dex?
+## What is dry-exec?
 
-`dex` is a **deterministic state exploration primitive** for autonomous execution loops. It intercepts proposed mutations, runs them inside ephemeral kernel sandboxes, and returns the exact state delta — without ever touching your real environment.
+`dry-exec` is a **deterministic state exploration primitive** for autonomous execution loops. It intercepts proposed mutations, runs them inside ephemeral kernel sandboxes, and returns the exact state delta — without ever touching your real environment.
 
 Think of it as `git diff` for arbitrary runtime state: memory, filesystem, and network — computed at the kernel level.
 
 ### Why?
 
-| Problem | dex |
+| Problem | dry-exec |
 |---|---|
 | Autonomous loops mutate state blindly | Every mutation runs in an isolated kernel sandbox first |
 | Rollback is expensive and error-prone | Nothing to roll back — baseline is never touched |
@@ -44,31 +44,31 @@ pip install dry-exec
 
 ## Quickstart
 
-### Path 1: The `dex` CLI (Direct Command Execution)
+### Path 1: The `de` CLI (Direct Command Execution)
 
-Run any command in an ephemeral sandbox. No YAML or Docker required:
+Like GitHub's `gh` command, `dry-exec` provides the punchy **`de`** CLI shortcut (with `dex` and `dry-exec` available as aliases). Run any command directly in an ephemeral sandbox without YAML or Docker:
 
 ```bash
 # Dry-run: inspect the state delta without modifying host
-dex "python migrate.py"
+de "python migrate.py"
 
 # Commit changes only if the dry-run delta looks right
-dex --commit "npm run seed"
+de --commit "npm run seed"
 
 # Inspect active environment limits and boundary rules
-dex inspect --config env.yaml
+de inspect --config env.yaml
 ```
 
 <br>
 
-### Path 2: The `@dex.dry_run` Decorator
+### Path 2: The `@dry_exec.dry_run` Decorator
 
 Wrap any function to run inside an ephemeral kernel sandbox. Returns the computed `StateDelta`:
 
 ```python
-import dex
+import dry_exec
 
-@dex.dry_run
+@dry_exec.dry_run
 def update_balance(account_id: str, amount: int):
     # Runs in ephemeral sandbox; database is untouched
     db.execute("UPDATE accounts SET balance = balance + $1 WHERE id = $2", amount, account_id)
@@ -77,10 +77,10 @@ delta = update_balance("acc_101", 500)
 print(f"{delta.total_bytes_mutated} bytes mutated in {delta.duration_nanos}ns")
 ```
 
-Or execute directly with functional `dex.run()`:
+Or execute directly with functional `dry_exec.run()`:
 
 ```python
-delta = dex.run("python seed_data.py")
+delta = dry_exec.run("python seed_data.py")
 ```
 
 <br>
@@ -91,7 +91,7 @@ Let an autonomous execution loop propose actions, test them ephemerally, evaluat
 
 ```python
 import asyncio
-from dex import Agent
+from dry_exec import Agent
 
 async def main():
     agent = Agent(task="Clean up old temp files and migrate user records")
@@ -106,15 +106,15 @@ asyncio.run(main())
 
 ## Architecture: Dual-Backend Engine
 
-`dex` features a **native dual-backend architecture**. It automatically detects the host operating system and compiles to native kernel primitives with sub-millisecond execution latencies:
+`dry-exec` features a **native dual-backend architecture**. It automatically detects the host operating system and compiles to native kernel primitives with sub-millisecond execution latencies:
 
 ```
-                              dex Architecture
-                                     │
-           ┌─────────────────────────┴─────────────────────────┐
-           ▼                                                   ▼
-     Linux Backend                                       macOS Backend
-  (Production & Cloud)                                (Local Development)
+                            dry-exec Architecture
+                                      │
+            ┌─────────────────────────┴─────────────────────────┐
+            ▼                                                   ▼
+      Linux Backend                                       macOS Backend
+   (Production & Cloud)                                (Local Development)
 ─────────────────────────                           ─────────────────────────
 • Linux Namespaces (PID, NET, MNT)                  • Apple Seatbelt (sandbox_init)
 • seccomp-BPF TRAP filter                           • APFS Copy-on-Write (clonefile)
@@ -123,31 +123,31 @@ asyncio.run(main())
 ```
 
 ```
- Autonomous Execution Loop (Python SDK)
- ┌──────────────────────────────────────────┐
- │  @dex.dry_run or Agent(task=...).run()   │
- │  Async FFI dispatch (GIL released)       │
- │  Structured telemetry + OTel spans       │
- └──────────────┬───────────────────────────┘
-                │ PyO3 FFI
-                ▼
- Rust Control Plane (Linux & macOS Router)
- ┌──────────────────────────────────────────┐
- │  Linux: Namespaces + seccomp + pagemap   │
- │  macOS: Seatbelt MAC + APFS CoW clone    │
- │  Transparent proxy for mock endpoints    │
- └──────────────┬───────────────────────────┘
-                │
-                ▼
-        StateDelta { memory, fs, network }
+  Autonomous Execution Loop (Python SDK)
+  ┌──────────────────────────────────────────────┐
+  │  @dry_exec.dry_run or Agent(task=...).run()  │
+  │  Async FFI dispatch (GIL released)           │
+  │  Structured telemetry + OTel spans           │
+  └──────────────┬───────────────────────────────┘
+                 │ PyO3 FFI / `de` CLI
+                 ▼
+  Rust Control Plane (Linux & macOS Router)
+  ┌──────────────────────────────────────────────┐
+  │  Linux: Namespaces + seccomp + pagemap       │
+  │  macOS: Seatbelt MAC + APFS CoW clone        │
+  │  Transparent proxy for mock endpoints        │
+  └──────────────┬───────────────────────────────┘
+                 │
+                 ▼
+         StateDelta { memory, fs, network }
 ```
 
 ---
 
 ## Features
 
-- **Direct `dex` CLI** — Run any command ephemerally without configuration files or Docker
-- **`@dex.dry_run` decorator** — Zero boilerplate ephemeral execution for Python functions
+- **Punchy `de` CLI (like `gh` for GitHub)** — Run any command ephemerally without configuration files or Docker (`dex` and `dry-exec` aliases supported)
+- **`@dry_exec.dry_run` decorator** — Zero boilerplate ephemeral execution for Python functions
 - **3-line agent loop** — Propose → dry-run → evaluate → self-correct → commit
 - **Native macOS support** — Kernel-level Seatbelt MAC sandboxing and APFS `clonefile` hardware CoW
 - **Kernel-level Linux isolation** — Linux namespaces (PID, NET, MNT, IPC, UTS) with seccomp-BPF filtering
@@ -162,11 +162,12 @@ asyncio.run(main())
 
 | Example | Description |
 |---|---|
-| [`quickstart.py`](examples/getting_started/quickstart.py) | 3-line setup with `@dex.dry_run` |
+| [`quickstart.py`](examples/getting_started/quickstart.py) | 3-line setup with `@dry_exec.dry_run` |
 | [`native_agent.py`](examples/getting_started/native_agent.py) | 3-line self-correcting agent loop |
 | [`type_safe_db_migration.py`](examples/use_cases/type_safe_db_migration.py) | DB migration recovering from schema boundary rejections |
 | [`api_payment_exploration.py`](examples/use_cases/api_payment_exploration.py) | Payment API exploration with mock interception |
 | [`langchain_tool.py`](examples/integrations/langchain_tool.py) | LangChain tool wrapper |
+
 
 ---
 

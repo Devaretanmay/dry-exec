@@ -25,9 +25,9 @@ test = [
 ]
 
 [project.scripts]
-dex = "dex.cli:main"
-dry-exec = "dex.cli:main"
-dry-exec-cli = "dex.cli:main"
+de = "dry_exec.cli:main"
+dex = "dry_exec.cli:main"
+dry-exec = "dry_exec.cli:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["python", "."]

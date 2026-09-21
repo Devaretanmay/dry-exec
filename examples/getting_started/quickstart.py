@@ -1,10 +1,10 @@
-"""Zero-boilerplate quickstart with dex: 3 lines to ephemeral execution."""
+"""Zero-boilerplate quickstart with dry-exec: 3 lines to ephemeral execution."""
 
 import asyncio
-import dex
+import dry_exec
 
 
-@dex.dry_run
+@dry_exec.dry_run
 def update_system_status():
     return {"status": "online"}
 
@@ -16,3 +16,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+

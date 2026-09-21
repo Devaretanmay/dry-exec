@@ -1,7 +1,7 @@
-"""3-line autonomous execution loop with dex."""
+"""3-line autonomous execution loop with dry-exec."""
 
 import asyncio
-from dex import Agent
+from dry_exec import Agent
 
 
 async def main():
@@ -15,3 +15,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
