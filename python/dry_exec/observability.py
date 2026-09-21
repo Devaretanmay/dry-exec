@@ -6,7 +6,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
-from dry_exec.exceptions import DryExecError, SchemaViolationError, SyscallBoundaryError
+from dry_exec.exceptions import SchemaViolationError, SyscallBoundaryError
 from dry_exec.models import StateDelta
 from dry_exec.schemas import Action, Environment
 from dry_exec.telemetry import TelemetryExporter
@@ -56,18 +56,28 @@ class DeltaLogger:
         import sys
 
         if sys.platform == "darwin":
-            summary_table.add_row("Memory Pages Mutated", "N/A [dim yellow](macOS bare-metal; Linux pagemap only)[/dim yellow]")
+            summary_table.add_row(
+                "Memory Pages Mutated",
+                "N/A [dim yellow](macOS bare-metal; Linux pagemap only)[/dim yellow]",
+            )
         else:
-            summary_table.add_row("Memory Pages Mutated", str(len(delta.memory_mutations)))
+            summary_table.add_row(
+                "Memory Pages Mutated", str(len(delta.memory_mutations))
+            )
         summary_table.add_row("Filesystem Changes", str(len(delta.fs_mutations)))
-        summary_table.add_row("Network Requests Intercepted", str(len(delta.network_mutations)))
-        summary_table.add_row("Total Mutated Bytes", f"{delta.total_bytes_mutated:,} bytes")
-        scan_backend = "APFS clonefile" if sys.platform == "darwin" else "kernel O(P_dirty) scan"
+        summary_table.add_row(
+            "Network Requests Intercepted", str(len(delta.network_mutations))
+        )
+        summary_table.add_row(
+            "Total Mutated Bytes", f"{delta.total_bytes_mutated:,} bytes"
+        )
+        scan_backend = (
+            "APFS clonefile" if sys.platform == "darwin" else "kernel O(P_dirty) scan"
+        )
         summary_table.add_row(
             "Computation Latency",
             f"{delta.duration_nanos / 1_000_000:.3f} ms ({scan_backend})",
         )
-
 
         self.console.print(
             Panel(
@@ -81,7 +91,6 @@ class DeltaLogger:
                 "[dim]Note: Memory page tracking uses Linux /proc/[pid]/pagemap. "
                 "Filesystem mutations (APFS CoW) and network proxy requests are fully tracked on macOS.[/dim]"
             )
-
 
         # 2. Memory Mutations Breakdown
         if delta.memory_mutations:
@@ -172,15 +181,24 @@ class DeltaLogger:
         if isinstance(error, SyscallBoundaryError):
             text = Text()
             text.append("Boundary Interception: Blocked Syscall\n", style="bold red")
-            text.append(f"Offending Syscall Number: {error.syscall_nr}\n", style="yellow")
-            text.append(f"Instruction Pointer: 0x{error.instruction_pointer:08x}\n", style="cyan")
+            text.append(
+                f"Offending Syscall Number: {error.syscall_nr}\n", style="yellow"
+            )
+            text.append(
+                f"Instruction Pointer: 0x{error.instruction_pointer:08x}\n",
+                style="cyan",
+            )
             text.append(
                 "Telemetry: The execution layer intercepted an unpermitted syscall. "
                 "The autonomous execution loop should adjust its control flow.",
                 style="dim",
             )
             self.console.print(
-                Panel(text, title="[bold red]Kernel Boundary Violation[/bold red]", border_style="red")
+                Panel(
+                    text,
+                    title="[bold red]Kernel Boundary Violation[/bold red]",
+                    border_style="red",
+                )
             )
         elif isinstance(error, SchemaViolationError):
             text = Text()
@@ -193,7 +211,11 @@ class DeltaLogger:
                 style="dim",
             )
             self.console.print(
-                Panel(text, title="[bold red]Schema Boundary Violation[/bold red]", border_style="red")
+                Panel(
+                    text,
+                    title="[bold red]Schema Boundary Violation[/bold red]",
+                    border_style="red",
+                )
             )
         else:
             self.console.print(

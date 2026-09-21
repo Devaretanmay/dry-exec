@@ -46,7 +46,9 @@ async def run_self_correcting_db_migration():
         action_id="mig_002_corrected",
         target_resource="balance",  # Valid, schema-compliant target
         mutation_type="execute_sql",
-        payload={"query": "UPDATE accounts SET balance = balance + 500 WHERE account_id = 'ACC_99';"},
+        payload={
+            "query": "UPDATE accounts SET balance = balance + 500 WHERE account_id = 'ACC_99';"
+        },
     )
 
     logger.render_action_header(env, corrected_action)

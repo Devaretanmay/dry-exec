@@ -14,7 +14,9 @@ pub use mount::{mount_ephemeral_tmpfs, set_mount_propagation_private, MountConfi
 #[cfg(target_os = "linux")]
 pub use namespace::NamespaceFlags;
 #[cfg(target_os = "linux")]
-pub use process::{execute_isolated_process, ProcessBoundaryConfig};
+pub use process::{
+    execute_isolated_process, execute_isolated_process_with_inspection, ProcessBoundaryConfig,
+};
 #[cfg(target_os = "linux")]
 pub use seccomp::{SeccompFilter, SyscallAction};
 

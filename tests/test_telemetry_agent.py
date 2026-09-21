@@ -1,6 +1,5 @@
 """Verification suite for Loop 9: Structured Telemetry, OTel Tracing, and Native Agent Loop."""
 
-import asyncio
 import json
 import logging
 from unittest.mock import MagicMock
@@ -8,7 +7,6 @@ import pytest
 from dry_exec import (
     Action,
     DryExecAgent,
-    DryExecClient,
     Environment,
     SchemaViolationError,
     StateDelta,
@@ -37,11 +35,12 @@ def memory_logger():
     return logger, handler
 
 
-
 def test_structured_json_telemetry_export(memory_logger):
     """Verify TelemetryExporter generates valid JSON structured receipts."""
     logger, handler = memory_logger
-    exporter = TelemetryExporter(service_name="test-service", logger=logger, emit_json_logs=True)
+    exporter = TelemetryExporter(
+        service_name="test-service", logger=logger, emit_json_logs=True
+    )
 
     env = Environment(
         name="telemetry_test_env",
@@ -68,7 +67,9 @@ def test_structured_json_telemetry_export(memory_logger):
         duration_nanos=150_000,
     )
 
-    receipt = exporter.export_delta_receipt(env, action, delta, trial_id=1, committed=True)
+    receipt = exporter.export_delta_receipt(
+        env, action, delta, trial_id=1, committed=True
+    )
 
     assert receipt["telemetry_type"] == "state_delta_receipt"
     assert receipt["service"] == "test-service"
@@ -106,7 +107,11 @@ def test_opentelemetry_span_tracing():
     # Trace error capture
     with pytest.raises(SchemaViolationError):
         with exporter.trace_ephemeral_action(env, action):
-            raise SchemaViolationError("Schema rejection", invalid_target="unauthorized", violation_type="target_error")
+            raise SchemaViolationError(
+                "Schema rejection",
+                invalid_target="unauthorized",
+                violation_type="target_error",
+            )
 
 
 @pytest.mark.asyncio
@@ -122,21 +127,26 @@ async def test_native_agent_loop_self_correction():
     def mock_llm(task: str, history: list) -> str:
         last_msg = history[-1]["content"] if history else ""
         if "Schema boundary violation" in last_msg or "Execution failed" in last_msg:
-            return json.dumps({
-                "action_id": "act_retry_valid",
-                "target_resource": "balance",
+            return json.dumps(
+                {
+                    "action_id": "act_retry_valid",
+                    "target_resource": "balance",
+                    "mutation_type": "update",
+                    "payload": {"amount": 500},
+                }
+            )
+        return json.dumps(
+            {
+                "action_id": "act_fail_invalid",
+                "target_resource": "unauthorized_field",
                 "mutation_type": "update",
                 "payload": {"amount": 500},
-            })
-        return json.dumps({
-            "action_id": "act_fail_invalid",
-            "target_resource": "unauthorized_field",
-            "mutation_type": "update",
-            "payload": {"amount": 500},
-        })
+            }
+        )
 
     # Mock client execution returning a valid delta
     mock_client = MagicMock()
+
     async def mock_execute(environment, action, **kwargs):
         environment.validate_action(action)
         return StateDelta(
@@ -146,9 +156,12 @@ async def test_native_agent_loop_self_correction():
             total_bytes_mutated=8,
             duration_nanos=200_000,
         )
+
     mock_client.execute_ephemeral_action = mock_execute
 
-    agent = DryExecAgent(environment=env, llm_caller=mock_llm, client=mock_client, max_retries=3)
+    agent = DryExecAgent(
+        environment=env, llm_caller=mock_llm, client=mock_client, max_retries=3
+    )
     result = await agent.run(task="Adjust account balance", auto_commit=True)
 
     assert result.success is True

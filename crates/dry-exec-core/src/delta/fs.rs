@@ -5,6 +5,12 @@ use crate::error::DeltaError;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// POSIX file-type mask (`S_IFMT`) normalized to `u32` for portable mode inspection.
+const S_IFMT: u32 = 0o170000;
+
+/// POSIX directory file-type bits (`S_IFDIR`).
+const S_IFDIR: u32 = 0o040000;
+
 /// Minimal inode metadata snapshot for efficient delta evaluation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InodeRecord {
@@ -108,7 +114,7 @@ fn traverse_dir(
             .to_path_buf();
 
         let stat = stat_path(&path)?;
-        let is_dir = (stat.mode & (libc::S_IFMT as u32)) == (libc::S_IFDIR as u32);
+        let is_dir = (stat.mode & S_IFMT) == S_IFDIR;
 
         records.insert(rel_path, stat);
 

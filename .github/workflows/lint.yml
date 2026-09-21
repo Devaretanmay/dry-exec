@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install Linting Tools
-        run: pip install --no-cache-dir ruff black
+        run: pip install --no-cache-dir "ruff==0.16.8" "black==26.5.1"
       - name: Check Ruff Formatting and Lint
         run: |
           ruff check .

@@ -17,7 +17,7 @@ pub fn scan_dirty_pages(
     region_len: usize,
     parent_baseline: &[u8],
 ) -> Result<Vec<PageMutation>, DeltaError> {
-    let num_pages = (region_len + PAGE_SIZE - 1) / PAGE_SIZE;
+    let num_pages = region_len.div_ceil(PAGE_SIZE);
     let pagemap_path = format!("/proc/{pid}/pagemap");
     let pagemap_file = File::open(&pagemap_path).map_err(|e| {
         DeltaError::PagemapParseError(format!("Failed to open {pagemap_path}: {e}"))

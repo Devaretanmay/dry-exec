@@ -11,9 +11,10 @@ def update_system_status():
 
 async def main():
     delta = update_system_status()
-    print(f"Ephemeral execution: {delta.total_bytes_mutated} bytes mutated in {delta.duration_nanos}ns")
+    print(
+        f"Ephemeral execution: {delta.total_bytes_mutated} bytes mutated in {delta.duration_nanos}ns"
+    )
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-

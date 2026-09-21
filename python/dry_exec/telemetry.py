@@ -12,6 +12,7 @@ from dry_exec.schemas import Action, Environment
 try:
     from opentelemetry import trace
     from opentelemetry.trace import Status, StatusCode
+
     OTEL_AVAILABLE = True
 except ImportError:
     trace = None
@@ -135,22 +136,41 @@ class TelemetryExporter:
             yield None
             return
 
-        with self.tracer.start_as_current_span("dry_exec.execute_ephemeral_action") as span:
+        with self.tracer.start_as_current_span(
+            "dry_exec.execute_ephemeral_action"
+        ) as span:
             span.set_attribute("dry_exec.environment.name", environment.name)
-            span.set_attribute("dry_exec.environment.memory_limit", environment.memory_limit_bytes)
+            span.set_attribute(
+                "dry_exec.environment.memory_limit", environment.memory_limit_bytes
+            )
             span.set_attribute("dry_exec.action.id", action.action_id)
             span.set_attribute("dry_exec.action.target", action.target_resource)
             span.set_attribute("dry_exec.action.mutation_type", action.mutation_type)
             try:
                 yield span
             except SyscallBoundaryError as exc:
-                span.set_status(Status(StatusCode.ERROR, f"Syscall Boundary Interception: nr={exc.syscall_nr}"))
+                span.set_status(
+                    Status(
+                        StatusCode.ERROR,
+                        f"Syscall Boundary Interception: nr={exc.syscall_nr}",
+                    )
+                )
                 span.set_attribute("dry_exec.violation.syscall_nr", exc.syscall_nr)
-                span.set_attribute("dry_exec.violation.instruction_pointer", f"0x{exc.instruction_pointer:x}")
+                span.set_attribute(
+                    "dry_exec.violation.instruction_pointer",
+                    f"0x{exc.instruction_pointer:x}",
+                )
                 raise
             except SchemaViolationError as exc:
-                span.set_status(Status(StatusCode.ERROR, f"Schema Boundary Rejection: {exc.violation_type}"))
-                span.set_attribute("dry_exec.violation.invalid_target", exc.invalid_target)
+                span.set_status(
+                    Status(
+                        StatusCode.ERROR,
+                        f"Schema Boundary Rejection: {exc.violation_type}",
+                    )
+                )
+                span.set_attribute(
+                    "dry_exec.violation.invalid_target", exc.invalid_target
+                )
                 span.set_attribute("dry_exec.violation.type", exc.violation_type)
                 raise
             except Exception as exc:

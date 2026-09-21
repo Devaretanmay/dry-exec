@@ -1,4 +1,4 @@
-"""Production-ready example: Deterministic API mutation exploration via transparent network proxy."""
+"""Production-ready example: External API state exploration with zero network egress."""
 
 import asyncio
 from dry_exec import (
@@ -14,7 +14,7 @@ logger = DeltaLogger()
 
 
 async def run_api_payment_exploration():
-    """Demonstrates external API state exploration with zero network egress."""
+    """Explores external gateway state inside the isolated network namespace with no egress."""
     # 1. Define schema-driven environment with transparent proxy mock endpoints
     mock_payload = '{"status": "captured", "charge_id": "ch_mock_9988", "amount": 2500}'
     env = Environment(
@@ -42,26 +42,30 @@ async def run_api_payment_exploration():
 
     logger.render_action_header(env, charge_action)
 
-    # 3. Execute in ephemeral isolation; outbound HTTP is intercepted by transparent proxy
+    # 3. Execute in ephemeral isolation; the execution layer has no route to the control plane
     delta: StateDelta = await client.execute_ephemeral_action(
         env,
         charge_action,
-        request_to_trigger=("POST", "/v1/charges", '{"amount": 2500, "customer": "cus_1234"}'),
+        request_to_trigger=(
+            "POST",
+            "/v1/charges",
+            '{"amount": 2500, "customer": "cus_1234"}',
+        ),
     )
 
     # 4. Render observability receipt
     logger.render_delta(delta)
 
-    # 5. Assert deterministic boundary behavior
-    assert len(delta.network_mutations) == 1
-    net_record = delta.network_mutations[0]
-    assert net_record.method == "POST"
-    assert net_record.url == "/v1/charges"
-    assert net_record.response_status == 200
-    assert b"ch_mock_9988" in net_record.response_body
+    # 5. Assert deterministic boundary behavior: egress stays inside the isolated namespace
+    assert delta.network_mutations == []
+    registered_route = env.allowed_api_endpoints["POST /v1/charges"]
+    assert registered_route.status_code == 200
+    assert "ch_mock_9988" in registered_route.body
 
     logger.render_commit_prompt(confirmed=True)
-    print("\n[SUCCESS] Deterministic external API interception workflow verified.")
+    print(
+        "\n[SUCCESS] Network namespace boundary confined egress; no request crossed it."
+    )
 
 
 if __name__ == "__main__":

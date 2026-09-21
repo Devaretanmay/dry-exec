@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 typer = pytest.importorskip("typer")
-from typer.testing import CliRunner
-from dry_exec.cli import app
+from typer.testing import CliRunner  # noqa: E402
+from dry_exec.cli import app  # noqa: E402
 
 runner = CliRunner()
 
@@ -23,11 +23,13 @@ def test_cli_inspect(tmp_path: Path):
     """Verify CLI inspect command parses and summarizes environment boundaries."""
     env_file = tmp_path / "test_env.json"
     env_file.write_text(
-        json.dumps({
-            "name": "cli_test_env",
-            "allowed_mutation_targets": ["user_balance", "order_status"],
-            "memory_limit_bytes": 2048,
-        }),
+        json.dumps(
+            {
+                "name": "cli_test_env",
+                "allowed_mutation_targets": ["user_balance", "order_status"],
+                "memory_limit_bytes": 2048,
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -41,26 +43,31 @@ def test_cli_ephemeral_run(tmp_path: Path, monkeypatch):
     """Verify CLI run command executes action and displays Rich delta visualization."""
     env_file = tmp_path / "env.json"
     env_file.write_text(
-        json.dumps({
-            "name": "ledger_env",
-            "allowed_mutation_targets": ["balance"],
-            "memory_limit_bytes": 1024 * 1024,
-        }),
+        json.dumps(
+            {
+                "name": "ledger_env",
+                "allowed_mutation_targets": ["balance"],
+                "memory_limit_bytes": 1024 * 1024,
+            }
+        ),
         encoding="utf-8",
     )
 
     action_file = tmp_path / "action.json"
     action_file.write_text(
-        json.dumps({
-            "action_id": "cli_act_01",
-            "target_resource": "balance",
-            "mutation_type": "credit",
-            "payload": {"amount": 100},
-        }),
+        json.dumps(
+            {
+                "action_id": "cli_act_01",
+                "target_resource": "balance",
+                "mutation_type": "credit",
+                "payload": {"amount": 100},
+            }
+        ),
         encoding="utf-8",
     )
 
     import dry_exec.cli
+
     if dry_exec.cli.DryExecClient()._ffi is None:
         from dry_exec.models import ByteDelta, PageMutation, StateDelta
 
@@ -79,7 +86,9 @@ def test_cli_ephemeral_run(tmp_path: Path, monkeypatch):
                 duration_nanos=500_000,
             )
 
-        monkeypatch.setattr(dry_exec.cli.DryExecClient, "execute_ephemeral_action", mock_exec)
+        monkeypatch.setattr(
+            dry_exec.cli.DryExecClient, "execute_ephemeral_action", mock_exec
+        )
 
     result = runner.invoke(
         app,
@@ -94,21 +103,25 @@ def test_cli_schema_violation_rejection(tmp_path: Path):
     """Verify CLI run command rejects unauthorized actions synchronously with code 2."""
     env_file = tmp_path / "env.json"
     env_file.write_text(
-        json.dumps({
-            "name": "ledger_env",
-            "allowed_mutation_targets": ["balance"],
-        }),
+        json.dumps(
+            {
+                "name": "ledger_env",
+                "allowed_mutation_targets": ["balance"],
+            }
+        ),
         encoding="utf-8",
     )
 
     invalid_action_file = tmp_path / "invalid_action.json"
     invalid_action_file.write_text(
-        json.dumps({
-            "action_id": "cli_act_invalid",
-            "target_resource": "unauthorized_column",
-            "mutation_type": "drop",
-            "payload": {},
-        }),
+        json.dumps(
+            {
+                "action_id": "cli_act_invalid",
+                "target_resource": "unauthorized_column",
+                "mutation_type": "drop",
+                "payload": {},
+            }
+        ),
         encoding="utf-8",
     )
 

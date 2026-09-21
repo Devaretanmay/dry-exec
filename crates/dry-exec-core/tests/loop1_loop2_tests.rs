@@ -4,16 +4,24 @@
 use dry_exec_core::delta::{scan_dirty_pages, AnonymousMemoryRegion, DeltaCoordinator};
 use dry_exec_core::error::BoundaryExitStatus;
 use dry_exec_core::isolation::{
-    execute_isolated_process, ProcessBoundaryConfig, SeccompFilter, SyscallAction,
+    execute_isolated_process, execute_isolated_process_with_inspection, ProcessBoundaryConfig,
+    SeccompFilter, SyscallAction,
 };
 use std::time::Instant;
+
+/// Boundary configuration with deterministic SECCOMP_RET_TRAP interception.
+fn trap_boundary_config() -> ProcessBoundaryConfig {
+    ProcessBoundaryConfig {
+        seccomp_filter: SeccompFilter::new(SyscallAction::Trap).with_baseline_whitelist(),
+        ..Default::default()
+    }
+}
 
 #[test]
 fn test_assertion_a_syscall_isolation_interception() {
     // Assertion A: Attempting a blocked syscall (e.g., socket) must result in
     // BoundaryExitStatus::SyscallViolation containing exact syscall_nr, with zero impact on parent.
-    let mut config = ProcessBoundaryConfig::default();
-    config.seccomp_filter = SeccompFilter::new(SyscallAction::Trap).with_baseline_whitelist();
+    let config = trap_boundary_config();
 
     let (status, _) = execute_isolated_process(&config, || {
         // Attempt blocked socket syscall: AF_INET, SOCK_STREAM, 0
@@ -48,7 +56,7 @@ fn test_assertion_b_state_delta_precision() {
     let region_size = 10 * 1024 * 1024; // 10MB
     let mut region = AnonymousMemoryRegion::allocate(region_size).expect("Mmap allocation failed");
 
-    // Pre-populate baseline state
+    // Pre-populate baseline state in the control plane mapping (CoW source)
     let baseline_slice = region.as_mut_slice();
     for (i, byte) in baseline_slice.iter_mut().enumerate() {
         *byte = (i % 251) as u8;
@@ -61,44 +69,47 @@ fn test_assertion_b_state_delta_precision() {
         .expect("Baseline snapshot failed");
 
     let raw_ptr = region.as_ptr() as usize;
+    let config = trap_boundary_config();
 
-    let mut config = ProcessBoundaryConfig::default();
-    config.seccomp_filter = SeccompFilter::new(SyscallAction::Trap).with_baseline_whitelist();
+    let (exit_status, inspected) = execute_isolated_process_with_inspection(
+        &config,
+        move || {
+            // Mutate Page 1 (offset 4096): 8 bytes
+            let page1_target = (raw_ptr + 4096) as *mut u8;
+            let page1_mutation = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22];
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    page1_mutation.as_ptr(),
+                    page1_target,
+                    page1_mutation.len(),
+                );
+            }
 
-    let (exit_status, _) = execute_isolated_process(&config, move || {
-        // Mutate Page 1 (offset 4096): 8 bytes
-        let page1_target = (raw_ptr + 4096) as *mut u8;
-        let page1_mutation = [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22];
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                page1_mutation.as_ptr(),
-                page1_target,
-                page1_mutation.len(),
-            );
-        }
+            // Mutate Page 3 (offset 12288): 4 bytes
+            let page3_target = (raw_ptr + 12288) as *mut u8;
+            let page3_mutation = [0xDE, 0xAD, 0xBE, 0xEF];
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    page3_mutation.as_ptr(),
+                    page3_target,
+                    page3_mutation.len(),
+                );
+            }
 
-        // Mutate Page 3 (offset 12288): 4 bytes
-        let page3_target = (raw_ptr + 12288) as *mut u8;
-        let page3_mutation = [0xDE, 0xAD, 0xBE, 0xEF];
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                page3_mutation.as_ptr(),
-                page3_target,
-                page3_mutation.len(),
-            );
-        }
-
-        // Ephemeral filesystem mutation: create one file in tmpfs overlay
-        let file_path = temp_dir.path().join("mutated_state.bin");
-        std::fs::write(file_path, b"ephemeral_state_delta")
-            .expect("Failed to write ephemeral file");
-    })
+            // Ephemeral filesystem mutation: create one file in tmpfs overlay
+            let file_path = temp_dir.path().join("mutated_state.bin");
+            std::fs::write(file_path, b"ephemeral_state_delta")
+                .expect("Failed to write ephemeral file");
+        },
+        // Inspect the live isolated execution layer while its CoW address space is retained
+        |child_pid| coordinator.compute_full_delta(child_pid, Some((&region, region_size))),
+    )
     .expect("Process boundary execution failed");
 
     assert_eq!(exit_status, BoundaryExitStatus::Exited(0));
 
-    let delta = coordinator
-        .compute_full_delta(std::process::id() as i32, Some((&region, region_size)))
+    let delta = inspected
+        .expect("Inspection closure did not execute against the live boundary")
         .expect("Delta computation failed");
 
     // Assert exactly 2 mutated pages
@@ -139,19 +150,29 @@ fn test_assertion_c_computational_complexity_bound() {
 
     let pid = std::process::id() as i32;
 
+    // Fault in every page before baseline reset so /proc/[pid]/clear_refs can write-protect
+    // the PTEs and arm soft-dirty tracking for subsequent writes.
+    for byte in region.as_mut_slice().iter_mut() {
+        *byte = 0;
+    }
+
+    // Retain the pre-execution baseline bytes: the control plane mapping is the comparison source.
+    let baseline = region.as_slice().to_vec();
+    let base_addr = region.as_ptr() as usize;
+
     // Reset baseline tracking
     dry_exec_core::delta::clear_soft_dirty_bits(pid).expect("Failed to clear soft-dirty bits");
 
     // Mutate 2 pages
-    let slice = region.as_mut_slice();
-    slice[4096] = 0xFF;
-    slice[12288] = 0xAA;
-
-    let base_addr = region.as_ptr() as usize;
+    {
+        let slice = region.as_mut_slice();
+        slice[4096] = 0xFF;
+        slice[12288] = 0xAA;
+    }
 
     let start = Instant::now();
-    let mutations = scan_dirty_pages(pid, base_addr, region_size, region.as_slice())
-        .expect("Dirty page scan failed");
+    let mutations =
+        scan_dirty_pages(pid, base_addr, region_size, &baseline).expect("Dirty page scan failed");
     let elapsed = start.elapsed();
 
     assert_eq!(mutations.len(), 2);

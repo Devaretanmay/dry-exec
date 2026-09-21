@@ -2,7 +2,6 @@
 
 import pytest
 import dry_exec.client
-import dex
 
 
 @pytest.fixture(autouse=True)
@@ -11,14 +10,18 @@ def fallback_ffi_if_host_non_linux(monkeypatch):
     if dry_exec.client._dry_exec_ffi is None:
         from dry_exec.models import ByteDelta, PageMutation, StateDelta
 
-        async def mock_execute(self, env, action, trigger_blocked_syscall=False, request_to_trigger=None):
+        async def mock_execute(
+            self, env, action, trigger_blocked_syscall=False, request_to_trigger=None
+        ):
             env.validate_action(action)
             return StateDelta(
                 memory_mutations=[
                     PageMutation(
                         page_index=0,
                         page_address=0x1000,
-                        deltas=[ByteDelta(offset=0, original=b"\x00", mutated=b"\xaa\xbb")],
+                        deltas=[
+                            ByteDelta(offset=0, original=b"\x00", mutated=b"\xaa\xbb")
+                        ],
                     )
                 ],
                 fs_mutations=[],
@@ -27,7 +30,9 @@ def fallback_ffi_if_host_non_linux(monkeypatch):
                 duration_nanos=320_000,
             )
 
-        monkeypatch.setattr(dry_exec.client.DryExecClient, "execute_ephemeral_action", mock_execute)
+        monkeypatch.setattr(
+            dry_exec.client.DryExecClient, "execute_ephemeral_action", mock_execute
+        )
 
 
 def test_dex_dry_run_sync_decorator():
@@ -98,19 +103,22 @@ async def test_dex_agent_three_line():
 
 def test_de_cli_direct_command():
     """Verify 'de' CLI direct command execution without YAML configuration."""
-    typer = pytest.importorskip("typer")
+    pytest.importorskip("typer")
     from typer.testing import CliRunner
     from dry_exec.cli import app
 
     runner = CliRunner()
     result = runner.invoke(app, ["echo 'hello world'", "--commit"])
     assert result.exit_code == 0
-    assert "State Delta Receipt" in result.stdout or "Ephemeral State Exploration" in result.stdout
+    assert (
+        "State Delta Receipt" in result.stdout
+        or "Ephemeral State Exploration" in result.stdout
+    )
 
 
 def test_de_cli_version():
     """Verify 'de' version output."""
-    typer = pytest.importorskip("typer")
+    pytest.importorskip("typer")
     from typer.testing import CliRunner
     from dry_exec.cli import app
 
@@ -124,8 +132,8 @@ def test_de_cli_version():
 def test_dex_compat_shim():
     """Verify dex module functions as backward compatibility shim for dry_exec."""
     import dex
+
     assert hasattr(dex, "Agent")
     assert hasattr(dex, "dry_run")
     assert hasattr(dex, "run")
     assert hasattr(dex, "StateDelta")
-

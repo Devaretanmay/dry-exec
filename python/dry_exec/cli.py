@@ -4,7 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 import subprocess
-from typing import Optional
+from typing import List, Optional, Tuple
 import uuid
 import typer
 import yaml
@@ -23,6 +23,20 @@ app = typer.Typer(
 
 console = Console()
 logger = DeltaLogger(console)
+
+# Explicit dex verbs resolved ahead of direct command execution.
+_DEX_VERBS = {"run", "inspect", "version"}
+
+# Option spellings recovered from the positional stream: click stops option parsing at the
+# first positional token, so `dex "npm run seed" --commit` arrives with the flag unparsed.
+_DIRECT_OPTION_FLAGS = {
+    "--commit": "commit",
+    "--config": "config",
+    "-c": "config",
+    "--action": "action",
+    "-a": "action",
+    "--net-request": "network_request",
+}
 
 
 def load_environment(config_path: Path) -> Environment:
@@ -120,7 +134,9 @@ def _execute_cli_flow(
         if auto_commit:
             confirmed = True
         else:
-            confirmed = typer.confirm("\nCommit state delta to target environment?", default=False)
+            confirmed = typer.confirm(
+                "\nCommit state delta to target environment?", default=False
+            )
 
         logger.render_commit_prompt(confirmed)
         if confirmed:
@@ -139,12 +155,115 @@ def _execute_cli_flow(
         raise typer.Exit(code=3)
 
 
+def _render_version() -> None:
+    """Render dex (dry-exec) version and kernel primitive capabilities."""
+    console.print("[bold green]dex[/bold green] (dry-exec) v1.0.0")
+    console.print("Architecture: Ephemeral Kernel Isolation & State Delta Engine")
+    console.print(
+        "Primitives: Linux Namespaces, Seccomp-BPF TRAP, Soft-Dirty Pagemap, Transparent Network Proxy, macOS Seatbelt & APFS CoW"
+    )
+
+
+def _inspect_environment(config: Path) -> None:
+    """Render environment boundary definitions, mutation whitelists, and mock endpoints."""
+    try:
+        env = load_environment(config)
+        console.print(f"[bold cyan]Environment:[/bold cyan] {env.name}")
+        console.print(
+            f"[bold cyan]Allowed Mutation Targets:[/bold cyan] {sorted(list(env.allowed_mutation_targets))}"
+        )
+        console.print(
+            f"[bold cyan]Filesystem Roots:[/bold cyan] {env.allowed_filesystem_roots}"
+        )
+        console.print(
+            f"[bold cyan]Memory Limit:[/bold cyan] {env.memory_limit_bytes:,} bytes"
+        )
+        console.print(
+            f"[bold cyan]Mock API Routes:[/bold cyan] {list(env.allowed_api_endpoints.keys())}"
+        )
+    except Exception as e:
+        console.print(f"[bold red]Inspection Error:[/bold red] {e}")
+        raise typer.Exit(code=1)
+
+
+def _split_direct_options(
+    tokens: List[str],
+    commit: bool,
+    config: Optional[Path],
+    action: Optional[Path],
+    network_request: Optional[str],
+) -> Tuple[List[str], bool, Optional[Path], Optional[Path], Optional[str]]:
+    """Separate control options from the positional token stream.
+
+    `--` terminates option recovery so wrapped commands may carry their own flags.
+    """
+    positional: List[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--":
+            positional.extend(tokens[index + 1 :])
+            break
+
+        target = _DIRECT_OPTION_FLAGS.get(token)
+        if target == "commit":
+            commit = True
+            index += 1
+            continue
+        if target is not None:
+            if index + 1 >= len(tokens):
+                console.print(
+                    f"[bold red]Configuration Error:[/bold red] {token} requires a value"
+                )
+                raise typer.Exit(code=1)
+            value = tokens[index + 1]
+            if target == "config":
+                config = Path(value)
+            elif target == "action":
+                action = Path(value)
+            else:
+                network_request = value
+            index += 2
+            continue
+
+        positional.append(token)
+        index += 1
+
+    return positional, commit, config, action, network_request
+
+
+def _dispatch_verb(
+    verb: str,
+    command: Optional[str],
+    config: Optional[Path],
+    action: Optional[Path],
+    auto_commit: bool,
+    network_request: Optional[str],
+) -> None:
+    """Dispatch an explicit dex verb to its control flow handler."""
+    if verb == "run":
+        _execute_cli_flow(
+            command=command,
+            config=config,
+            action=action,
+            auto_commit=auto_commit,
+            network_request=network_request,
+        )
+    elif verb == "inspect":
+        if config is None:
+            console.print("[bold red]Inspection Error:[/bold red] --config is required")
+            raise typer.Exit(code=1)
+        _inspect_environment(config)
+    else:
+        _render_version()
+
+
 @app.callback(invoke_without_command=True)
 def main_callback(
     ctx: typer.Context,
-    command: Optional[str] = typer.Argument(
+    tokens: Optional[List[str]] = typer.Argument(
         None,
-        help="Command to execute within ephemeral isolation boundary (e.g. 'python migrate.py')",
+        help="dex verb ('run', 'inspect', 'version') or command to execute within the boundary",
     ),
     commit: bool = typer.Option(
         False,
@@ -173,15 +292,37 @@ def main_callback(
     if ctx.invoked_subcommand is not None:
         return
 
+    # A root-level positional argument is captured before click resolves subcommands, so dex
+    # verbs and trailing control options are dispatched explicitly from the token stream.
+    tokens, commit, config, action, network_request = _split_direct_options(
+        list(tokens or []), commit, config, action, network_request
+    )
+
+    verb = tokens[0] if tokens else None
+    if verb in _DEX_VERBS:
+        _dispatch_verb(
+            verb,
+            command=" ".join(tokens[1:]) or None,
+            config=config,
+            action=action,
+            auto_commit=commit,
+            network_request=network_request,
+        )
+        return
+
+    command = " ".join(tokens) if tokens else None
+
     if command is None and config is None and action is None:
-        console.print("[bold green]dex[/bold green] (dry-exec) - Ephemeral kernel execution primitive\n")
+        console.print(
+            "[bold green]dex[/bold green] (dry-exec) - Ephemeral kernel execution primitive\n"
+        )
         console.print("Usage: dex [OPTIONS] COMMAND")
         console.print("       dex run [--config ... --action ...]")
         console.print("       dex inspect --config ...\n")
         console.print("Examples:")
         console.print('  dex "python migrate.py"')
         console.print('  dex --commit "npm run seed"')
-        console.print('  dex run --config env.yaml --action action.yaml\n')
+        console.print("  dex run --config env.yaml --action action.yaml\n")
         console.print("[dim]Aliases: 'de', 'dry-exec'[/dim]\n")
         return
 
@@ -235,28 +376,18 @@ def run(
 
 @app.command()
 def inspect(
-    config: Path = typer.Option(..., "--config", "-c", help="Path to environment configuration (YAML/JSON)"),
+    config: Path = typer.Option(
+        ..., "--config", "-c", help="Path to environment configuration (YAML/JSON)"
+    ),
 ) -> None:
     """Inspect environment boundary definitions, mutation whitelists, and mock endpoints."""
-    try:
-        env = load_environment(config)
-        console.print(f"[bold cyan]Environment:[/bold cyan] {env.name}")
-        console.print(f"[bold cyan]Allowed Mutation Targets:[/bold cyan] {sorted(list(env.allowed_mutation_targets))}")
-        console.print(f"[bold cyan]Filesystem Roots:[/bold cyan] {env.allowed_filesystem_roots}")
-        console.print(f"[bold cyan]Memory Limit:[/bold cyan] {env.memory_limit_bytes:,} bytes")
-        console.print(f"[bold cyan]Mock API Routes:[/bold cyan] {list(env.allowed_api_endpoints.keys())}")
-    except Exception as e:
-        console.print(f"[bold red]Inspection Error:[/bold red] {e}")
-        raise typer.Exit(code=1)
+    _inspect_environment(config)
 
 
 @app.command()
 def version() -> None:
     """Display dex (dry-exec) version and kernel primitive capabilities."""
-    console.print("[bold green]dex[/bold green] (dry-exec) v1.0.0")
-    console.print("Architecture: Ephemeral Kernel Isolation & State Delta Engine")
-    console.print("Primitives: Linux Namespaces, Seccomp-BPF TRAP, Soft-Dirty Pagemap, Transparent Network Proxy, macOS Seatbelt & APFS CoW")
-
+    _render_version()
 
 
 def main() -> None:
@@ -266,4 +397,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

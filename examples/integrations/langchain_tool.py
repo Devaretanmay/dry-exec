@@ -10,9 +10,15 @@ class DryExecToolInput(BaseModel):
     """Input schema for dry-exec exploration tool."""
 
     action_id: str = Field(description="Unique identifier for the action invocation.")
-    target_resource: str = Field(description="Target resource identifier for state mutation.")
-    mutation_type: str = Field(description="Operation classification (e.g., update, append, set).")
-    payload: Dict[str, Any] = Field(default_factory=dict, description="Action payload parameters.")
+    target_resource: str = Field(
+        description="Target resource identifier for state mutation."
+    )
+    mutation_type: str = Field(
+        description="Operation classification (e.g., update, append, set)."
+    )
+    payload: Dict[str, Any] = Field(
+        default_factory=dict, description="Action payload parameters."
+    )
 
 
 class DryExecLangChainTool:
@@ -33,11 +39,25 @@ class DryExecLangChainTool:
         )
         self.client = DryExecClient()
 
-    def _run(self, action_id: str, target_resource: str, mutation_type: str, payload: Dict[str, Any]) -> str:
+    def _run(
+        self,
+        action_id: str,
+        target_resource: str,
+        mutation_type: str,
+        payload: Dict[str, Any],
+    ) -> str:
         """Synchronous run interface for LangChain."""
-        return asyncio.run(self._arun(action_id, target_resource, mutation_type, payload))
+        return asyncio.run(
+            self._arun(action_id, target_resource, mutation_type, payload)
+        )
 
-    async def _arun(self, action_id: str, target_resource: str, mutation_type: str, payload: Dict[str, Any]) -> str:
+    async def _arun(
+        self,
+        action_id: str,
+        target_resource: str,
+        mutation_type: str,
+        payload: Dict[str, Any],
+    ) -> str:
         """Asynchronous execution interface for LangChain agent loops."""
         action = Action(
             action_id=action_id,
@@ -45,7 +65,9 @@ class DryExecLangChainTool:
             mutation_type=mutation_type,
             payload=payload,
         )
-        delta: StateDelta = await self.client.execute_ephemeral_action(self.environment, action)
+        delta: StateDelta = await self.client.execute_ephemeral_action(
+            self.environment, action
+        )
         return (
             f"Dry-run executed successfully. StateDelta summary: "
             f"Mutated bytes: {delta.total_bytes_mutated}, "

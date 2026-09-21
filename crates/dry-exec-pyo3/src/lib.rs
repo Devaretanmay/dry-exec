@@ -13,6 +13,9 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
+/// Schema-driven mock endpoint: (method, path, status_code, headers, body).
+type MockEndpoint = (String, String, u16, HashMap<String, String>, Vec<u8>);
+
 create_exception!(_dry_exec_ffi, IsolationSetupError, PyException);
 create_exception!(_dry_exec_ffi, SyscallBoundaryError, PyException);
 create_exception!(_dry_exec_ffi, StateDeltaComputationError, PyException);
@@ -25,7 +28,7 @@ fn execute_isolated_action(
     memory_size: usize,
     tmpfs_path: String,
     trigger_blocked_syscall: bool,
-    mock_endpoints: Option<Vec<(String, String, u16, HashMap<String, String>, Vec<u8>)>>,
+    mock_endpoints: Option<Vec<MockEndpoint>>,
     request_to_trigger: Option<(String, String, String)>,
 ) -> PyResult<PyObject> {
     #[cfg(target_os = "linux")]
@@ -38,8 +41,8 @@ fn execute_isolated_action(
     let result = py.allow_threads(|| {
         use dry_exec_core::error::BoundaryExitStatus;
         use dry_exec_core::isolation::{
-            execute_isolated_process, MountConfig, ProcessBoundaryConfig, SeccompFilter,
-            SyscallAction,
+            execute_isolated_process_with_inspection, MountConfig, ProcessBoundaryConfig,
+            SeccompFilter, SyscallAction,
         };
 
         let mem_region = if memory_size > 0 {
@@ -85,12 +88,6 @@ fn execute_isolated_action(
             None
         };
 
-        let mut config = ProcessBoundaryConfig::default();
-        config.mount_config = MountConfig {
-            tmpfs_path: std::path::PathBuf::from(&tmpfs_path),
-            mount_sterile_proc: true,
-        };
-
         let mut filter = SeccompFilter::new(SyscallAction::Trap).with_baseline_whitelist();
         if request_to_trigger.is_some() {
             filter = filter
@@ -99,37 +96,57 @@ fn execute_isolated_action(
                 .allow(libc::SYS_sendto)
                 .allow(libc::SYS_recvfrom);
         }
-        config.seccomp_filter = filter;
+
+        let config = ProcessBoundaryConfig {
+            mount_config: MountConfig {
+                tmpfs_path: std::path::PathBuf::from(&tmpfs_path),
+                mount_sterile_proc: true,
+            },
+            seccomp_filter: filter,
+            ..Default::default()
+        };
 
         let raw_ptr = region.as_ref().map(|r| r.as_ptr() as usize).unwrap_or(0);
 
-        let boundary_result = execute_isolated_process(&config, move || {
-            if trigger_blocked_syscall {
-                unsafe {
-                    let _ = libc::syscall(libc::SYS_socket, libc::AF_INET, libc::SOCK_STREAM, 0);
-                }
-            } else if let Some((method, path, body)) = request_to_trigger {
-                if let Some(port) = proxy_port {
-                    if let Ok(mut stream) = TcpStream::connect(format!("127.0.0.1:{port}")) {
-                        let req = format!(
-                            "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\n\r\n{body}",
-                            body.len()
-                        );
-                        let _ = stream.write_all(req.as_bytes());
-                        let mut resp = Vec::new();
-                        let _ = stream.read_to_end(&mut resp);
+        // Inspect the live isolated execution layer: soft-dirty pagemap bits are read while the
+        // Copy-on-Write address space is still retained, against the control plane's baseline.
+        let boundary_result = execute_isolated_process_with_inspection(
+            &config,
+            move || {
+                if trigger_blocked_syscall {
+                    unsafe {
+                        let _ =
+                            libc::syscall(libc::SYS_socket, libc::AF_INET, libc::SOCK_STREAM, 0);
+                    }
+                } else if let Some((method, path, body)) = request_to_trigger {
+                    if let Some(port) = proxy_port {
+                        if let Ok(mut stream) = TcpStream::connect(format!("127.0.0.1:{port}")) {
+                            let req = format!(
+                                "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: {}\r\n\r\n{body}",
+                                body.len()
+                            );
+                            let _ = stream.write_all(req.as_bytes());
+                            let mut resp = Vec::new();
+                            let _ = stream.read_to_end(&mut resp);
+                        }
+                    }
+                } else if raw_ptr > 0 {
+                    let target = raw_ptr as *mut u8;
+                    let payload = [0xDE, 0xAD, 0xBE, 0xEF];
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(payload.as_ptr(), target, payload.len());
                     }
                 }
-            } else if raw_ptr > 0 {
-                let target = raw_ptr as *mut u8;
-                let payload = [0xDE, 0xAD, 0xBE, 0xEF];
-                unsafe {
-                    std::ptr::copy_nonoverlapping(payload.as_ptr(), target, payload.len());
-                }
-            }
-        });
+            },
+            |child_pid| {
+                coordinator.compute_full_delta(
+                    child_pid,
+                    region.as_ref().map(|r| (r, memory_size)),
+                )
+            },
+        );
 
-        let (status, _) = match boundary_result {
+        let (status, inspected) = match boundary_result {
             Ok(s) => s,
             Err(e) => return Err(format!("Execution boundary error: {e}")),
         };
@@ -149,11 +166,8 @@ fn execute_isolated_action(
                     return Err(format!("Process exited with status code {code}"));
                 }
 
-                let delta = coordinator
-                    .compute_full_delta(
-                        std::process::id() as i32,
-                        region.as_ref().map(|r| (r, memory_size)),
-                    )
+                let delta = inspected
+                    .ok_or_else(|| "Boundary inspection did not execute".to_string())?
                     .map_err(|e| format!("Delta computation error: {e}"))?;
 
                 Ok(delta)

@@ -82,6 +82,23 @@ impl SeccompFilter {
             libc::SYS_sigaltstack,
             libc::SYS_getpid,
             libc::SYS_gettid,
+            // Ephemeral filesystem IO primitives for in-boundary state mutation
+            libc::SYS_openat,
+            libc::SYS_newfstatat,
+            libc::SYS_ftruncate,
+            libc::SYS_fsync,
+            libc::SYS_pread64,
+            libc::SYS_pwrite64,
+            libc::SYS_readv,
+            libc::SYS_writev,
+            libc::SYS_getdents64,
+            // Memory and runtime support primitives
+            libc::SYS_mremap,
+            libc::SYS_futex,
+            libc::SYS_getrandom,
+            libc::SYS_clock_gettime,
+            libc::SYS_rt_sigprocmask,
+            libc::SYS_sched_yield,
         ];
 
         for nr in baseline {
@@ -92,40 +109,37 @@ impl SeccompFilter {
 
     /// Compile the rules into raw classic BPF (cBPF) instructions.
     pub fn compile_bpf(&self) -> Vec<libc::sock_filter> {
-        let mut filter: Vec<libc::sock_filter> = Vec::new();
-
         // 1. Validate architecture: Load arch from struct seccomp_data (offset 4)
-        // BPF_LD | BPF_W | BPF_ABS, k = offsetof(struct seccomp_data, arch)
-        filter.push(libc::sock_filter {
-            code: (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
-            jt: 0,
-            jf: 0,
-            k: 4,
-        });
-
-        // Jump to next instruction if arch matches CURRENT_AUDIT_ARCH, otherwise jump to kill
-        filter.push(libc::sock_filter {
-            code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
-            jt: 1,
-            jf: 0,
-            k: CURRENT_AUDIT_ARCH,
-        });
-
-        // Kill process on architecture mismatch
-        filter.push(libc::sock_filter {
-            code: (libc::BPF_RET | libc::BPF_K) as u16,
-            jt: 0,
-            jf: 0,
-            k: libc::SECCOMP_RET_KILL_PROCESS,
-        });
-
         // 2. Load syscall number from struct seccomp_data (offset 0)
-        filter.push(libc::sock_filter {
-            code: (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
-            jt: 0,
-            jf: 0,
-            k: 0,
-        });
+        let mut filter: Vec<libc::sock_filter> = vec![
+            // BPF_LD | BPF_W | BPF_ABS, k = offsetof(struct seccomp_data, arch)
+            libc::sock_filter {
+                code: (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+                jt: 0,
+                jf: 0,
+                k: 4,
+            },
+            // Jump to next instruction if arch matches CURRENT_AUDIT_ARCH, otherwise jump to kill
+            libc::sock_filter {
+                code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+                jt: 1,
+                jf: 0,
+                k: CURRENT_AUDIT_ARCH,
+            },
+            // Kill process on architecture mismatch
+            libc::sock_filter {
+                code: (libc::BPF_RET | libc::BPF_K) as u16,
+                jt: 0,
+                jf: 0,
+                k: libc::SECCOMP_RET_KILL_PROCESS,
+            },
+            libc::sock_filter {
+                code: (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+                jt: 0,
+                jf: 0,
+                k: 0,
+            },
+        ];
 
         // 3. For each allowed syscall, compare and conditionally jump to ALLOW
         let n_rules = self.allowed_syscalls.len();

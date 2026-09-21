@@ -7,6 +7,7 @@ from dry_exec.exceptions import SchemaViolationError
 
 class MockResponse(BaseModel):
     """Deterministic mock response definition for a schema-driven API route."""
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     status_code: int = Field(default=200, description="HTTP status code")
@@ -22,19 +23,29 @@ class MockResponse(BaseModel):
 
 class Action(BaseModel):
     """Proposed state-mutation action originating from the autonomous execution loop."""
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     action_id: str = Field(description="Unique identifier for the action invocation")
-    target_resource: str = Field(description="Designated state target (e.g., field, entity, or path)")
-    mutation_type: str = Field(description="Operation classification (e.g., set, append, delete)")
-    payload: Dict[str, Any] = Field(default_factory=dict, description="State-mutation arguments and parameters")
+    target_resource: str = Field(
+        description="Designated state target (e.g., field, entity, or path)"
+    )
+    mutation_type: str = Field(
+        description="Operation classification (e.g., set, append, delete)"
+    )
+    payload: Dict[str, Any] = Field(
+        default_factory=dict, description="State-mutation arguments and parameters"
+    )
 
 
 class Environment(BaseModel):
     """Target execution boundary defining permitted mutation targets, endpoints, and resource limits."""
+
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    name: str = Field(default="default_sandbox", description="Identifier for the target environment")
+    name: str = Field(
+        default="default_sandbox", description="Identifier for the target environment"
+    )
     allowed_mutation_targets: Set[str] = Field(
         default_factory=lambda: {"*"},
         description="Immutable whitelist of state fields or entities permitted for mutation",
@@ -54,10 +65,13 @@ class Environment(BaseModel):
 
     def validate_action(self, action: Action) -> None:
         """Enforces synchronous schema validation before crossing the FFI boundary.
-        
+
         Raises SchemaViolationError immediately if the proposed action targets an unauthorized resource.
         """
-        if "*" not in self.allowed_mutation_targets and action.target_resource not in self.allowed_mutation_targets:
+        if (
+            "*" not in self.allowed_mutation_targets
+            and action.target_resource not in self.allowed_mutation_targets
+        ):
             raise SchemaViolationError(
                 message=(
                     f"Action '{action.action_id}' targeting resource '{action.target_resource}' "

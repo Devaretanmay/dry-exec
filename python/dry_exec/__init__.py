@@ -5,7 +5,7 @@ import concurrent.futures
 import functools
 import inspect
 import uuid
-from typing import Any, Callable, Dict, List, Optional, Set, Union
+from typing import Callable, Optional, Set, Union
 
 from dry_exec.agent import Agent, AgentExecutionResult, DryExecAgent
 from dry_exec.client import DryExecClient
@@ -52,10 +52,11 @@ def dry_run(
     client: Optional[DryExecClient] = None,
 ):
     """Decorator wrapping function execution within an ephemeral kernel isolation boundary.
-    
+
     Returns the computed StateDelta showing exact byte/inode/network mutations.
     Host state remains untouched unless commit=True.
     """
+
     def decorator(fn: Callable):
         target_name = getattr(fn, "__name__", "ephemeral_target")
         target_env = environment or Environment(
@@ -66,6 +67,7 @@ def dry_run(
         exec_client = client or DryExecClient()
 
         if inspect.iscoroutinefunction(fn):
+
             @functools.wraps(fn)
             async def async_wrapper(*args, **kwargs) -> StateDelta:
                 action = Action(
@@ -84,6 +86,7 @@ def dry_run(
 
             return async_wrapper
         else:
+
             @functools.wraps(fn)
             def sync_wrapper(*args, **kwargs) -> StateDelta:
                 action = Action(
@@ -95,7 +98,9 @@ def dry_run(
                         "kwargs": {k: str(v) for k, v in kwargs.items()},
                     },
                 )
-                delta = _exec_coro_safely(exec_client.execute_ephemeral_action(target_env, action))
+                delta = _exec_coro_safely(
+                    exec_client.execute_ephemeral_action(target_env, action)
+                )
                 if commit:
                     fn(*args, **kwargs)
                 return delta
@@ -129,16 +134,23 @@ def run(
             mutation_type="execute",
             payload={"command": target},
         )
-        delta = _exec_coro_safely(exec_client.execute_ephemeral_action(target_env, action))
+        delta = _exec_coro_safely(
+            exec_client.execute_ephemeral_action(target_env, action)
+        )
         if commit:
             import subprocess
+
             subprocess.run(target, shell=True, check=True)
         return delta
     elif callable(target):
-        wrapper = dry_run(target, environment=environment, commit=commit, client=exec_client)
+        wrapper = dry_run(
+            target, environment=environment, commit=commit, client=exec_client
+        )
         return wrapper(*args, **kwargs)
     else:
-        raise TypeError(f"Expected callable or shell command string, got {type(target).__name__}")
+        raise TypeError(
+            f"Expected callable or shell command string, got {type(target).__name__}"
+        )
 
 
 __all__ = [
@@ -164,4 +176,3 @@ __all__ = [
     "IsolationSetupError",
     "StateDeltaComputationError",
 ]
-

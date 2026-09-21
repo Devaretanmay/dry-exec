@@ -93,7 +93,7 @@ pub fn clear_soft_dirty_bits(pid: i32) -> Result<(), DeltaError> {
     let mut file = OpenOptions::new()
         .write(true)
         .open(&clear_refs_path)
-        .map_err(|e| DeltaError::IoError(e))?;
+        .map_err(DeltaError::IoError)?;
 
     file.write_all(b"4\n").map_err(DeltaError::IoError)?;
     Ok(())

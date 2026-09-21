@@ -1,6 +1,5 @@
 """Streamlined autonomous execution loop with ephemeral dry-run evaluation and self-correction."""
 
-import asyncio
 import json
 import os
 from typing import Any, Callable, Dict, List, Optional
@@ -91,7 +90,9 @@ class Agent:
         """Executes the autonomous loop: propose -> dry-run -> evaluate delta -> self-correct / commit."""
         active_task = task or self.task
         if not active_task:
-            raise ValueError("Task must be specified either at initialization or in run().")
+            raise ValueError(
+                "Task must be specified either at initialization or in run()."
+            )
 
         conversation_history: List[Dict[str, str]] = []
         error_history: List[str] = []
@@ -117,14 +118,23 @@ class Agent:
             except Exception as e:
                 err_msg = f"Failed to parse proposal into Action schema: {e}"
                 error_history.append(err_msg)
-                conversation_history.append({"role": "assistant", "content": llm_response_text})
-                conversation_history.append({"role": "user", "content": f"Schema error: {err_msg}. Please adjust."})
+                conversation_history.append(
+                    {"role": "assistant", "content": llm_response_text}
+                )
+                conversation_history.append(
+                    {
+                        "role": "user",
+                        "content": f"Schema error: {err_msg}. Please adjust.",
+                    }
+                )
                 continue
 
             self.logger.render_action_header(self.environment, action)
 
             try:
-                delta: StateDelta = await self.client.execute_ephemeral_action(self.environment, action)
+                delta: StateDelta = await self.client.execute_ephemeral_action(
+                    self.environment, action
+                )
                 self.logger.render_delta(delta, trial_id=trial)
 
                 if auto_commit:
@@ -151,28 +161,40 @@ class Agent:
                 err_msg = f"Schema boundary violation: {sve.violation_type} on target '{sve.invalid_target}'"
                 error_history.append(err_msg)
                 self.logger.render_error(sve, trial_id=trial)
-                conversation_history.append({"role": "assistant", "content": action.model_dump_json()})
-                conversation_history.append({
-                    "role": "user",
-                    "content": f"Execution failed: {err_msg}. Permitted targets: {allowed_desc}. Self-correct and provide updated Action JSON.",
-                })
+                conversation_history.append(
+                    {"role": "assistant", "content": action.model_dump_json()}
+                )
+                conversation_history.append(
+                    {
+                        "role": "user",
+                        "content": f"Execution failed: {err_msg}. Permitted targets: {allowed_desc}. Self-correct and provide updated Action JSON.",
+                    }
+                )
 
             except SyscallBoundaryError as sbe:
                 err_msg = f"Syscall boundary violation: syscall_nr {sbe.syscall_nr} at 0x{sbe.instruction_pointer:x}"
                 error_history.append(err_msg)
                 self.logger.render_error(sbe, trial_id=trial)
-                conversation_history.append({"role": "assistant", "content": action.model_dump_json()})
-                conversation_history.append({
-                    "role": "user",
-                    "content": f"Execution failed: {err_msg}. Adjust control flow without invoking restricted syscalls.",
-                })
+                conversation_history.append(
+                    {"role": "assistant", "content": action.model_dump_json()}
+                )
+                conversation_history.append(
+                    {
+                        "role": "user",
+                        "content": f"Execution failed: {err_msg}. Adjust control flow without invoking restricted syscalls.",
+                    }
+                )
 
             except DryExecError as dee:
                 err_msg = f"Boundary error: {dee}"
                 error_history.append(err_msg)
                 self.logger.render_error(dee, trial_id=trial)
-                conversation_history.append({"role": "assistant", "content": action.model_dump_json()})
-                conversation_history.append({"role": "user", "content": f"Boundary error: {err_msg}."})
+                conversation_history.append(
+                    {"role": "assistant", "content": action.model_dump_json()}
+                )
+                conversation_history.append(
+                    {"role": "user", "content": f"Boundary error: {err_msg}."}
+                )
 
         return AgentExecutionResult(
             task=active_task,
@@ -186,30 +208,37 @@ class Agent:
     def _default_mock_llm(self, task: str, history: List[Dict[str, str]]) -> str:
         """Deterministic fallback LLM generator demonstrating proposal and self-correction."""
         last_message = history[-1]["content"] if history else ""
-        if "Schema boundary violation" in last_message or "Execution failed" in last_message:
+        if (
+            "Schema boundary violation" in last_message
+            or "Execution failed" in last_message
+        ):
             allowed = (
                 "default_resource"
                 if "*" in self.environment.allowed_mutation_targets
                 else list(self.environment.allowed_mutation_targets)[0]
             )
-            return json.dumps({
-                "action_id": "act_corrected_02",
-                "target_resource": allowed,
-                "mutation_type": "update",
-                "payload": {"resolution": "corrected_value"},
-            })
+            return json.dumps(
+                {
+                    "action_id": "act_corrected_02",
+                    "target_resource": allowed,
+                    "mutation_type": "update",
+                    "payload": {"resolution": "corrected_value"},
+                }
+            )
 
         allowed = (
             "default_resource"
             if "*" in self.environment.allowed_mutation_targets
             else list(self.environment.allowed_mutation_targets)[0]
         )
-        return json.dumps({
-            "action_id": "act_initial_01",
-            "target_resource": allowed,
-            "mutation_type": "update",
-            "payload": {"state": "active"},
-        })
+        return json.dumps(
+            {
+                "action_id": "act_initial_01",
+                "target_resource": allowed,
+                "mutation_type": "update",
+                "payload": {"state": "active"},
+            }
+        )
 
 
 # Backward-compatible alias

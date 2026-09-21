@@ -5,7 +5,9 @@ import dry_exec.client
 
 try:
     from examples.use_cases.api_payment_exploration import run_api_payment_exploration
-    from examples.use_cases.type_safe_db_migration import run_self_correcting_db_migration
+    from examples.use_cases.type_safe_db_migration import (
+        run_self_correcting_db_migration,
+    )
 except ImportError:
     from examples.api_payment_exploration import run_api_payment_exploration
     from examples.type_safe_db_migration import run_self_correcting_db_migration
@@ -15,9 +17,16 @@ except ImportError:
 def fallback_ffi_if_host_non_linux(monkeypatch):
     """Fallback mock when tests run on non-Linux hosts where Rust kernel primitives are disabled."""
     if dry_exec.client._dry_exec_ffi is None:
-        from dry_exec.models import ByteDelta, InterceptedRequest, PageMutation, StateDelta
+        from dry_exec.models import (
+            ByteDelta,
+            InterceptedRequest,
+            PageMutation,
+            StateDelta,
+        )
 
-        async def mock_execute(self, env, action, trigger_blocked_syscall=False, request_to_trigger=None):
+        async def mock_execute(
+            self, env, action, trigger_blocked_syscall=False, request_to_trigger=None
+        ):
             env.validate_action(action)
             net_mutations = []
             if request_to_trigger:
@@ -37,7 +46,11 @@ def fallback_ffi_if_host_non_linux(monkeypatch):
                     PageMutation(
                         page_index=0,
                         page_address=0x1000,
-                        deltas=[ByteDelta(offset=0, original=b"\x00", mutated=b"\xde\xad\xbe\xef")],
+                        deltas=[
+                            ByteDelta(
+                                offset=0, original=b"\x00", mutated=b"\xde\xad\xbe\xef"
+                            )
+                        ],
                     )
                 ],
                 fs_mutations=[],
@@ -46,7 +59,9 @@ def fallback_ffi_if_host_non_linux(monkeypatch):
                 duration_nanos=450_000,
             )
 
-        monkeypatch.setattr(dry_exec.client.DryExecClient, "execute_ephemeral_action", mock_execute)
+        monkeypatch.setattr(
+            dry_exec.client.DryExecClient, "execute_ephemeral_action", mock_execute
+        )
 
 
 @pytest.mark.asyncio
@@ -65,12 +80,14 @@ async def test_example_api_payment_exploration():
 async def test_example_quickstart():
     """Verify getting started quickstart example executes without error."""
     from examples.getting_started.quickstart import main as quickstart_main
+
     await quickstart_main()
 
 
 def test_example_langchain_tool():
     """Verify LangChain tool wrapper executes within ephemeral boundary."""
     from examples.integrations.langchain_tool import DryExecLangChainTool
+
     tool = DryExecLangChainTool()
     receipt = tool._run(
         action_id="act_lc_test",
@@ -85,5 +102,5 @@ def test_example_langchain_tool():
 async def test_example_native_agent():
     """Verify native agent loop example executes and self-corrects successfully."""
     from examples.getting_started.native_agent import main as native_agent_main
-    await native_agent_main()
 
+    await native_agent_main()

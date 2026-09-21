@@ -10,9 +10,10 @@ async def main():
 
     # 2. Execute ephemeral loop: propose -> dry-run -> evaluate -> commit
     result = await agent.run()
-    print(f"Autonomous loop complete: success={result.success}, trials={result.trials_conducted}")
+    print(
+        f"Autonomous loop complete: success={result.success}, trials={result.trials_conducted}"
+    )
 
 
 if __name__ == "__main__":
     asyncio.run(main())
-

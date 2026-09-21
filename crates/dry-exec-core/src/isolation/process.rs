@@ -11,12 +11,26 @@ use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
 const STACK_SIZE: usize = 2 * 1024 * 1024; // 2MB stack for cloned execution layer
 
+/// Control-plane protocol byte: execution layer ready for baseline reset.
+const BOUNDARY_READY: u8 = 0x01;
+
+/// Control-plane protocol byte: isolated action completed without a boundary breach.
+/// The execution layer then blocks until the control plane releases it.
+const BOUNDARY_DONE: u8 = 0x00;
+
+/// Control-plane protocol byte: boundary breach intercepted; frame carries a `ViolationPacket`.
+const BOUNDARY_VIOLATION: u8 = 0x02;
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct ViolationPacket {
     pub syscall_nr: u32,
     pub instruction_pointer: u64,
 }
+
+/// Framed boundary breach record: protocol tag byte followed by a `ViolationPacket`.
+const VIOLATION_PACKET_SIZE: usize = std::mem::size_of::<ViolationPacket>();
+const VIOLATION_FRAME_SIZE: usize = 1 + VIOLATION_PACKET_SIZE;
 
 // Global raw descriptor for the isolated child's SIGSYS handler
 static mut CHILD_SYNC_FD: RawFd = -1;
@@ -43,27 +57,31 @@ extern "C" fn sigsys_handler(
 
         unsafe {
             if CHILD_SYNC_FD >= 0 {
-                let bytes = std::slice::from_raw_parts(
+                let mut frame = [0u8; VIOLATION_FRAME_SIZE];
+                frame[0] = BOUNDARY_VIOLATION;
+                let packet_bytes = std::slice::from_raw_parts(
                     &packet as *const ViolationPacket as *const u8,
-                    std::mem::size_of::<ViolationPacket>(),
+                    VIOLATION_PACKET_SIZE,
                 );
+                frame[1..].copy_from_slice(packet_bytes);
                 let _ = libc::write(
                     CHILD_SYNC_FD,
-                    bytes.as_ptr() as *const libc::c_void,
-                    bytes.len(),
+                    frame.as_ptr() as *const libc::c_void,
+                    frame.len(),
                 );
             }
             libc::_exit(128 + libc::SIGSYS);
         }
     } else {
-        unsafe { libc::_exit(128 + libc::SIGSYS) };
+        unsafe { libc::_exit(128 + libc::SIGSYS) }
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 unsafe fn libc_siginfo_syscall(info: &libc::siginfo_t) -> u32 {
-    // In glibc / musl x86_64 siginfo_t, si_syscall is located at offset 0x20
-    let ptr = (info as *const libc::siginfo_t as *const u8).add(32) as *const i32;
+    // On 64-bit Linux siginfo_t, `_sifields` is 8-byte aligned and therefore
+    // begins at offset 16: si_call_addr (16) then si_syscall (24).
+    let ptr = (info as *const libc::siginfo_t as *const u8).add(24) as *const i32;
     *ptr as u32
 }
 
@@ -113,6 +131,37 @@ impl Default for ProcessBoundaryConfig {
     }
 }
 
+/// Write a control-plane protocol byte ignoring `SIGPIPE` when the peer boundary is gone.
+fn send_control_byte(fd: RawFd, byte: u8) {
+    let buf = [byte; 1];
+    unsafe {
+        let _ = libc::send(
+            fd,
+            buf.as_ptr() as *const libc::c_void,
+            buf.len(),
+            libc::MSG_NOSIGNAL,
+        );
+    }
+}
+
+/// Decode a raw wait status into a typed boundary exit status.
+fn decode_wait_status(status: WaitStatus) -> BoundaryExitStatus {
+    match status {
+        WaitStatus::Exited(_, code) => BoundaryExitStatus::Exited(code),
+        WaitStatus::Signaled(_, sig, _) => {
+            if sig == Signal::SIGSYS {
+                BoundaryExitStatus::SyscallViolation {
+                    syscall_nr: 0,
+                    instruction_pointer: 0,
+                }
+            } else {
+                BoundaryExitStatus::Signaled(sig as i32)
+            }
+        }
+        _ => BoundaryExitStatus::Exited(-1),
+    }
+}
+
 /// Clones an ephemeral process into isolated namespaces, applies boundaries, and executes action.
 pub fn execute_isolated_process<F, R>(
     config: &ProcessBoundaryConfig,
@@ -121,6 +170,27 @@ pub fn execute_isolated_process<F, R>(
 where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
+{
+    execute_isolated_process_with_inspection(config, action, |_child_pid| ())
+        .map(|(status, _)| (status, None))
+}
+
+/// Clones an ephemeral process into isolated namespaces, applies boundaries, and executes action,
+/// invoking `inspect` on the control plane while the ephemeral execution layer is still live.
+///
+/// The isolated execution layer retains its Copy-on-Write address space, blocked on the
+/// synchronization boundary, for the duration of `inspect`. This allows the state delta engine
+/// to sample `[pid]/pagemap` soft-dirty bits and read mutated pages before the boundary closes.
+/// `inspect` receives the live child PID; its return value is surfaced alongside the exit status.
+pub fn execute_isolated_process_with_inspection<F, R, I, T>(
+    config: &ProcessBoundaryConfig,
+    action: F,
+    inspect: I,
+) -> Result<(BoundaryExitStatus, Option<T>), IsolationError>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+    I: FnOnce(i32) -> T,
 {
     // Create synchronization socketpair for parent-child boundary coordination
     let mut fds = [0; 2];
@@ -144,7 +214,7 @@ where
 
     // Allocate isolated stack for clone(2)
     let mut stack = vec![0u8; STACK_SIZE];
-    let stack_top = unsafe { (stack.as_mut_ptr() as *mut u8).add(STACK_SIZE) };
+    let stack_top = unsafe { stack.as_mut_ptr().add(STACK_SIZE) };
 
     // Pack execution closure and config into box for raw pointer handover
     struct ChildPayload<F> {
@@ -186,19 +256,19 @@ where
         }
 
         // 2. Notify parent control plane: child ready for baseline reset
-        let ready_byte: [u8; 1] = [1];
+        let ready_byte: [u8; 1] = [BOUNDARY_READY];
         let _ = unsafe { libc::write(child_fd, ready_byte.as_ptr() as *const libc::c_void, 1) };
 
         // 3. Await parent acknowledgment (baseline clear completion)
         let mut ack_byte = [0u8; 1];
         let n = unsafe { libc::read(child_fd, ack_byte.as_mut_ptr() as *mut libc::c_void, 1) };
         if n <= 0 {
-            unsafe { libc::_exit(1) };
+            unsafe { libc::_exit(1) }
         }
 
         // 4. Attach Seccomp-BPF syscall interception boundary
         if let Err(_e) = payload.config.seccomp_filter.attach() {
-            unsafe { libc::_exit(2) };
+            unsafe { libc::_exit(2) }
         }
 
         // 5. Execute isolated state-mutation action
@@ -206,18 +276,23 @@ where
             let _ = act();
         }
 
-        // 6. Signal completion to parent
-        let done_byte: [u8; 1] = [0];
+        // 6. Signal completion to parent, then hold the CoW address space open until released
+        let done_byte: [u8; 1] = [BOUNDARY_DONE];
         let _ = unsafe { libc::write(child_fd, done_byte.as_ptr() as *const libc::c_void, 1) };
 
-        unsafe { libc::_exit(0) };
+        let mut release_byte = [0u8; 1];
+        let _ = unsafe { libc::read(child_fd, release_byte.as_mut_ptr() as *mut libc::c_void, 1) };
+
+        unsafe { libc::_exit(0) }
     }
 
     let clone_flags = config.namespaces.to_clone_flags().bits() | libc::SIGCHLD;
 
     let child_pid = unsafe {
         libc::clone(
-            std::mem::transmute(child_entry_point::<F, R> as *const ()),
+            std::mem::transmute::<*const (), extern "C" fn(*mut libc::c_void) -> libc::c_int>(
+                child_entry_point::<F, R> as *const (),
+            ),
             stack_top as *mut libc::c_void,
             clone_flags,
             payload_ptr as *mut libc::c_void,
@@ -253,60 +328,79 @@ where
         }
 
         // Send ACK byte to release child into action execution
-        let ack_byte = [1u8; 1];
-        let _ = unsafe {
-            libc::write(
-                parent_sock.as_raw_fd(),
-                ack_byte.as_ptr() as *const libc::c_void,
-                1,
-            )
-        };
+        send_control_byte(parent_sock.as_raw_fd(), 1);
     }
 
-    // Wait for child process termination
+    // Await the completion frame: a boundary breach record or a clean-completion marker
+    let mut tag = [0u8; 1];
+    let tag_len = unsafe {
+        libc::read(
+            parent_sock.as_raw_fd(),
+            tag.as_mut_ptr() as *mut libc::c_void,
+            1,
+        )
+    };
+
+    if tag_len != 1 {
+        // Execution layer terminated before reporting; decode the raw wait status
+        let wait_status = waitpid(pid, None).map_err(|e| {
+            IsolationError::ProcessFailure(format!("waitpid failure on child {child_pid}: {e}"))
+        })?;
+        return Ok((decode_wait_status(wait_status), None));
+    }
+
+    if tag[0] == BOUNDARY_VIOLATION {
+        let mut packet = ViolationPacket {
+            syscall_nr: 0,
+            instruction_pointer: 0,
+        };
+        let packet_bytes = unsafe {
+            std::slice::from_raw_parts_mut(
+                &mut packet as *mut ViolationPacket as *mut u8,
+                VIOLATION_PACKET_SIZE,
+            )
+        };
+
+        let mut received = 0usize;
+        while received < VIOLATION_PACKET_SIZE {
+            let n = unsafe {
+                libc::read(
+                    parent_sock.as_raw_fd(),
+                    packet_bytes[received..].as_mut_ptr() as *mut libc::c_void,
+                    VIOLATION_PACKET_SIZE - received,
+                )
+            };
+            if n <= 0 {
+                break;
+            }
+            received += n as usize;
+        }
+
+        let _ = waitpid(pid, None);
+
+        let status = if received == VIOLATION_PACKET_SIZE && packet.syscall_nr != 0 {
+            BoundaryExitStatus::SyscallViolation {
+                syscall_nr: packet.syscall_nr,
+                instruction_pointer: packet.instruction_pointer,
+            }
+        } else {
+            BoundaryExitStatus::SyscallViolation {
+                syscall_nr: 0,
+                instruction_pointer: 0,
+            }
+        };
+
+        return Ok((status, None));
+    }
+
+    // Clean completion: the address space is live and inspectable until released
+    let inspection = inspect(child_pid);
+
+    send_control_byte(parent_sock.as_raw_fd(), 1);
+
     let wait_status = waitpid(pid, None).map_err(|e| {
         IsolationError::ProcessFailure(format!("waitpid failure on child {child_pid}: {e}"))
     })?;
 
-    // Check if child sent a ViolationPacket across the synchronization socket
-    let mut packet = ViolationPacket {
-        syscall_nr: 0,
-        instruction_pointer: 0,
-    };
-    let packet_size = std::mem::size_of::<ViolationPacket>();
-    let packet_bytes = unsafe {
-        std::slice::from_raw_parts_mut(&mut packet as *mut ViolationPacket as *mut u8, packet_size)
-    };
-
-    let n = unsafe {
-        libc::read(
-            parent_sock.as_raw_fd(),
-            packet_bytes.as_mut_ptr() as *mut libc::c_void,
-            packet_size,
-        )
-    };
-
-    let boundary_status = if n == packet_size as isize && packet.syscall_nr != 0 {
-        BoundaryExitStatus::SyscallViolation {
-            syscall_nr: packet.syscall_nr,
-            instruction_pointer: packet.instruction_pointer,
-        }
-    } else {
-        match wait_status {
-            WaitStatus::Exited(_, code) => BoundaryExitStatus::Exited(code),
-            WaitStatus::Signaled(_, sig, _) => {
-                if sig == Signal::SIGSYS {
-                    BoundaryExitStatus::SyscallViolation {
-                        syscall_nr: 0,
-                        instruction_pointer: 0,
-                    }
-                } else {
-                    BoundaryExitStatus::Signaled(sig as i32)
-                }
-            }
-            _ => BoundaryExitStatus::Exited(-1),
-        }
-    };
-
-    Ok((boundary_status, None))
+    Ok((decode_wait_status(wait_status), Some(inspection)))
 }

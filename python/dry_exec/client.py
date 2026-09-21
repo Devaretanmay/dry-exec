@@ -4,11 +4,16 @@ import asyncio
 from typing import Any, Dict, Optional, Tuple
 from dry_exec.exceptions import (
     IsolationSetupError,
-    SchemaViolationError,
     StateDeltaComputationError,
     SyscallBoundaryError,
 )
-from dry_exec.models import ByteDelta, FsMutation, InterceptedRequest, PageMutation, StateDelta
+from dry_exec.models import (
+    ByteDelta,
+    FsMutation,
+    InterceptedRequest,
+    PageMutation,
+    StateDelta,
+)
 from dry_exec.schemas import Action, Environment
 from dry_exec.telemetry import TelemetryExporter
 
@@ -39,7 +44,9 @@ if _dry_exec_ffi is None:
                         if name.endswith(".so"):
                             tmp_so = Path(tempfile.gettempdir()) / Path(name).name
                             tmp_so.write_bytes(z.read(name))
-                            spec = importlib.util.spec_from_file_location("_dry_exec_ffi", tmp_so)
+                            spec = importlib.util.spec_from_file_location(
+                                "_dry_exec_ffi", tmp_so
+                            )
                             if spec and spec.loader:
                                 mod = importlib.util.module_from_spec(spec)
                                 spec.loader.exec_module(mod)
@@ -51,7 +58,9 @@ if _dry_exec_ffi is None:
                 break
         else:
             try:
-                spec = importlib.util.spec_from_file_location("_dry_exec_ffi", candidate)
+                spec = importlib.util.spec_from_file_location(
+                    "_dry_exec_ffi", candidate
+                )
                 if spec and spec.loader:
                     mod = importlib.util.module_from_spec(spec)
                     spec.loader.exec_module(mod)
@@ -89,11 +98,21 @@ class DryExecClient:
                 request_to_trigger=request_to_trigger,
             )
             if span is not None:
-                span.set_attribute("dry_exec.delta.total_bytes_mutated", delta.total_bytes_mutated)
-                span.set_attribute("dry_exec.delta.duration_nanos", delta.duration_nanos)
-                span.set_attribute("dry_exec.delta.memory_pages", len(delta.memory_mutations))
-                span.set_attribute("dry_exec.delta.fs_mutations", len(delta.fs_mutations))
-                span.set_attribute("dry_exec.delta.network_requests", len(delta.network_mutations))
+                span.set_attribute(
+                    "dry_exec.delta.total_bytes_mutated", delta.total_bytes_mutated
+                )
+                span.set_attribute(
+                    "dry_exec.delta.duration_nanos", delta.duration_nanos
+                )
+                span.set_attribute(
+                    "dry_exec.delta.memory_pages", len(delta.memory_mutations)
+                )
+                span.set_attribute(
+                    "dry_exec.delta.fs_mutations", len(delta.fs_mutations)
+                )
+                span.set_attribute(
+                    "dry_exec.delta.network_requests", len(delta.network_mutations)
+                )
             return delta
 
     async def _execute_internal(
@@ -120,13 +139,15 @@ class DryExecClient:
                 parts = route_key.strip().split(maxsplit=1)
                 method = parts[0].upper() if len(parts) > 0 else "GET"
                 path = parts[1] if len(parts) > 1 else "/"
-                mock_endpoints_tuples.append((
-                    method,
-                    path,
-                    mock_resp.status_code,
-                    mock_resp.headers,
-                    mock_resp.body.encode("utf-8"),
-                ))
+                mock_endpoints_tuples.append(
+                    (
+                        method,
+                        path,
+                        mock_resp.status_code,
+                        mock_resp.headers,
+                        mock_resp.body.encode("utf-8"),
+                    )
+                )
 
         action_payload_json = action.model_dump_json()
         tmpfs_path = (
@@ -151,7 +172,9 @@ class DryExecClient:
             if exc_type == "SyscallBoundaryError" or hasattr(exc, "syscall_nr"):
                 syscall_nr = getattr(exc, "syscall_nr", 0)
                 ip = getattr(exc, "instruction_pointer", 0)
-                raise SyscallBoundaryError(str(exc), syscall_nr=syscall_nr, instruction_pointer=ip) from exc
+                raise SyscallBoundaryError(
+                    str(exc), syscall_nr=syscall_nr, instruction_pointer=ip
+                ) from exc
             elif exc_type == "StateDeltaComputationError":
                 raise StateDeltaComputationError(str(exc)) from exc
             elif exc_type == "IsolationSetupError":

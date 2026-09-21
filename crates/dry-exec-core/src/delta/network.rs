@@ -70,7 +70,7 @@ pub struct TransparentProxy {
 impl TransparentProxy {
     /// Start transparent proxy listener on loopback interface with schema-driven mocking.
     pub fn start(schema: NetworkMockSchema) -> Result<Self, DeltaError> {
-        let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| DeltaError::IoError(e))?;
+        let listener = TcpListener::bind("127.0.0.1:0").map_err(DeltaError::IoError)?;
         let port = listener.local_addr().map_err(DeltaError::IoError)?.port();
 
         let is_running = Arc::new(AtomicBool::new(true));
