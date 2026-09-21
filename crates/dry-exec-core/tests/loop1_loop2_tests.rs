@@ -69,6 +69,9 @@ fn test_assertion_b_state_delta_precision() {
         .expect("Baseline snapshot failed");
 
     let raw_ptr = region.as_ptr() as usize;
+    // Hand the isolated action a path only: moving the `TempDir` guard into the child would
+    // unlink the ephemeral directory from inside the boundary when the closure is dropped.
+    let ephemeral_root = temp_dir.path().to_path_buf();
     let config = trap_boundary_config();
 
     let (exit_status, inspected) = execute_isolated_process_with_inspection(
@@ -96,8 +99,8 @@ fn test_assertion_b_state_delta_precision() {
                 );
             }
 
-            // Ephemeral filesystem mutation: create one file in tmpfs overlay
-            let file_path = temp_dir.path().join("mutated_state.bin");
+            // Ephemeral filesystem mutation: create one file in the tmpfs overlay
+            let file_path = ephemeral_root.join("mutated_state.bin");
             std::fs::write(file_path, b"ephemeral_state_delta")
                 .expect("Failed to write ephemeral file");
         },

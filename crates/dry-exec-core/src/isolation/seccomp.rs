@@ -85,6 +85,7 @@ impl SeccompFilter {
             // Ephemeral filesystem IO primitives for in-boundary state mutation
             libc::SYS_openat,
             libc::SYS_newfstatat,
+            libc::SYS_statx,
             libc::SYS_ftruncate,
             libc::SYS_fsync,
             libc::SYS_pread64,
