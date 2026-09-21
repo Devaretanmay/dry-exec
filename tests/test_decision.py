@@ -190,8 +190,8 @@ def test_cli_blocks_commit_on_escalation(tmp_path, monkeypatch):
 
     assert result.exit_code == 4
     assert "System-One Decision: Escalation Required" in result.stdout
-    assert (
-        "Escalation required. Re-run with --commit to force." in _plain(result.stdout)
+    assert "Escalation required. Re-run with --commit to force." in _plain(
+        result.stdout
     )
 
 
