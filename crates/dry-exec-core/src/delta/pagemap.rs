@@ -40,15 +40,13 @@ pub fn scan_dirty_pages(
     let mut mutations = Vec::new();
     let mut child_page_buf = [0u8; PAGE_SIZE];
     let local_pid = std::process::id() as i32 == pid;
-    let soft_dirty_available =
-        descriptors
-            .as_chunks::<PAGEMAP_ENTRY_SIZE>()
-            .0
-            .iter()
-            .any(|bytes| {
-                let entry = u64::from_le_bytes(bytes.try_into().unwrap());
-                entry & PAGE_SOFT_DIRTY_BIT != 0
-            });
+    let soft_dirty_available = descriptors
+        .chunks(PAGEMAP_ENTRY_SIZE)
+        .filter(|bytes| bytes.len() == PAGEMAP_ENTRY_SIZE)
+        .any(|bytes| {
+            let entry = u64::from_le_bytes(bytes.try_into().unwrap());
+            entry & PAGE_SOFT_DIRTY_BIT != 0
+        });
 
     for page_idx in 0..num_pages {
         let entry_offset = page_idx * PAGEMAP_ENTRY_SIZE;
