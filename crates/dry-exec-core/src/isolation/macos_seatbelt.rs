@@ -59,7 +59,7 @@ pub fn generate_seatbelt_profile(config: &SeatbeltConfig) -> String {
         sbpl.push_str("(allow process-fork)\n");
         sbpl.push_str("(allow sysctl-read)\n\n");
         sbpl.push_str("(allow signal (target self))\n");
-        sbpl.push_str("\n");
+        sbpl.push('\n');
     }
 
     // Terminal and standard descriptor IO

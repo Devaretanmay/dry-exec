@@ -40,10 +40,15 @@ pub fn scan_dirty_pages(
     let mut mutations = Vec::new();
     let mut child_page_buf = [0u8; PAGE_SIZE];
     let local_pid = std::process::id() as i32 == pid;
-    let soft_dirty_available = descriptors.chunks_exact(PAGEMAP_ENTRY_SIZE).any(|bytes| {
-        let entry = u64::from_le_bytes(bytes.try_into().unwrap());
-        entry & PAGE_SOFT_DIRTY_BIT != 0
-    });
+    let soft_dirty_available =
+        descriptors
+            .as_chunks::<PAGEMAP_ENTRY_SIZE>()
+            .0
+            .iter()
+            .any(|bytes| {
+                let entry = u64::from_le_bytes(bytes.try_into().unwrap());
+                entry & PAGE_SOFT_DIRTY_BIT != 0
+            });
 
     for page_idx in 0..num_pages {
         let entry_offset = page_idx * PAGEMAP_ENTRY_SIZE;
@@ -103,7 +108,7 @@ fn compute_slice_deltas(
     mutated: &[u8],
 ) -> Vec<ByteDelta> {
     if baseline.len() == mutated.len()
-        && baseline.len() > 0
+        && !baseline.is_empty()
         && unsafe {
             libc::memcmp(
                 baseline.as_ptr() as *const libc::c_void,

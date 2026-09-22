@@ -142,7 +142,7 @@ pub fn execute_macos_command(
                 libc::setenv(key.as_ptr(), empty.as_ptr(), 1);
             }
             libc::execvp(argv[0].as_ptr(), argv_ptrs.as_ptr());
-            libc::perror(b"execvp failed\0".as_ptr() as *const libc::c_char);
+            libc::perror(c"execvp failed".as_ptr());
             libc::_exit(127);
         }
 

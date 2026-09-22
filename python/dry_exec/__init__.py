@@ -60,10 +60,7 @@ def _callable_command(fn: Callable, args, kwargs):
     source = "\n".join(
         line for line in source.splitlines() if not line.lstrip().startswith("@")
     )
-    script = (
-        f"{source}\n\n"
-        f"{fn.__name__}(*{args!r}, **{kwargs!r})\n"
-    )
+    script = f"{source}\n\n{fn.__name__}(*{args!r}, **{kwargs!r})\n"
     handle = tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", prefix="dry_exec_callable_", delete=False
     )
@@ -115,7 +112,9 @@ def dry_run(
                     },
                 )
                 try:
-                    delta = await exec_client.execute_ephemeral_action(target_env, action)
+                    delta = await exec_client.execute_ephemeral_action(
+                        target_env, action
+                    )
                     enforce_escalation(delta.decision, force=commit)
                     if commit:
                         await fn(*args, **kwargs)
