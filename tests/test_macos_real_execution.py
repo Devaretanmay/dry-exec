@@ -6,7 +6,6 @@ import pytest
 
 from dry_exec import Action, DryExecClient, Environment
 
-
 pytestmark = pytest.mark.skipif(
     sys.platform != "darwin", reason="Requires macOS Seatbelt and APFS backend"
 )

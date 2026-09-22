@@ -7,7 +7,6 @@ import pytest
 
 from dry_exec import Action, DryExecClient, Environment, MockResponse, StateDelta
 
-
 pytestmark = pytest.mark.skipif(
     sys.platform != "linux", reason="Requires Linux namespaces and native FFI"
 )
