@@ -7,9 +7,13 @@
 //! construction rather than by convention.
 
 pub mod environment;
+pub mod laya_scorer;
 pub mod primitives;
 
 pub use environment::{DeltaSummary, Environment};
+#[cfg(feature = "laya")]
+pub use laya_scorer::LayaScorer;
+pub use laya_scorer::NeuralScoringStrategy;
 pub use primitives::{Choice, DecisionReceipt, Noul, Score};
 
 /// Calibrated weighting of the mutation-volume term of the risk score.
@@ -88,11 +92,72 @@ pub fn evaluate(summary: &DeltaSummary, environment: &Environment) -> DecisionRe
     }
 }
 
+/// Evaluates an allowed delta with an optional local neural scorer.
+///
+/// Deterministic refusals never invoke the scorer. If a scorer is present, its calibrated risk
+/// contributes 60% of the final score while the deterministic score contributes 40%.
+pub fn evaluate_with_neural(
+    summary: &DeltaSummary,
+    environment: &Environment,
+    scorer: Option<&dyn NeuralScoringStrategy>,
+    task: &str,
+    semantic_summary: &str,
+) -> DecisionReceipt {
+    let deterministic = evaluate(summary, environment);
+    if deterministic.choice != Choice::Allowed {
+        return deterministic;
+    }
+
+    let Some(scorer) = scorer else {
+        return deterministic;
+    };
+
+    let neural_risk = Score::new(scorer.score(task, semantic_summary));
+    let risk_score = Score::new(deterministic.risk_score.value() * 0.4 + neural_risk.value() * 0.6);
+    let noul_trigger = if risk_score.value() <= environment.max_risk_threshold {
+        Noul::AutoCommit
+    } else {
+        Noul::Escalate
+    };
+    let reason = match noul_trigger {
+        Noul::AutoCommit => format!(
+            "Risk score {:.2}; deterministic rules passed and local System-One analysis stayed within threshold {:.2}",
+            risk_score.value(),
+            environment.max_risk_threshold
+        ),
+        Noul::Escalate => format!(
+            "Risk score {:.2}; deterministic rules passed but local System-One analysis exceeded threshold {:.2}",
+            risk_score.value(),
+            environment.max_risk_threshold
+        ),
+    };
+
+    DecisionReceipt {
+        choice: Choice::Allowed,
+        risk_score,
+        noul_trigger,
+        reason,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::delta::{PageMutation, StateDelta};
+    use std::cell::Cell;
     use std::time::{Duration, Instant};
+
+    struct FixedScorer {
+        value: f32,
+        calls: Cell<usize>,
+    }
+
+    impl NeuralScoringStrategy for FixedScorer {
+        fn score(&self, _task: &str, _semantic_summary: &str) -> f32 {
+            self.calls.set(self.calls.get() + 1);
+            self.value
+        }
+    }
 
     /// Page count whose 4KB granularity accounts for roughly 100MB of mutation volume.
     const HUNDRED_MEGABYTE_PAGES: usize = 25_600;
@@ -236,6 +301,47 @@ mod tests {
         );
         assert_eq!(mutated.choice, Choice::Violated);
         assert_eq!(mutated.risk_score.value(), Score::MAX);
+    }
+
+    #[test]
+    fn test_hybrid_path_short_circuits_deterministic_refusal() {
+        let scorer = FixedScorer {
+            value: 1.0,
+            calls: Cell::new(0),
+        };
+        let receipt = evaluate_with_neural(
+            &DeltaSummary {
+                schema_breaches: 1,
+                ..Default::default()
+            },
+            &Environment::default(),
+            Some(&scorer),
+            "delete production data",
+            "schema route rejected",
+        );
+
+        assert_eq!(receipt.choice, Choice::Blocked);
+        assert_eq!(scorer.calls.get(), 0);
+    }
+
+    #[test]
+    fn test_hybrid_path_blends_deterministic_and_local_scores() {
+        let scorer = FixedScorer {
+            value: 1.0,
+            calls: Cell::new(0),
+        };
+        let receipt = evaluate_with_neural(
+            &DeltaSummary::default(),
+            &Environment::default(),
+            Some(&scorer),
+            "inspect report",
+            "read-only summary",
+        );
+
+        assert_eq!(receipt.choice, Choice::Allowed);
+        assert_eq!(receipt.noul_trigger, Noul::Escalate);
+        assert!((receipt.risk_score.value() - 0.6).abs() < f32::EPSILON);
+        assert_eq!(scorer.calls.get(), 1);
     }
 
     #[test]

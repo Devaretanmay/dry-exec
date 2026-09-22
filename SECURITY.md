@@ -27,6 +27,14 @@ Relevant escape classes include kernel vulnerabilities, namespace configuration 
 
 Registered HTTP routes return deterministic responses through the local proxy. Unregistered routes are recorded as schema breaches. HTTPS `CONNECT` is terminated with an ephemeral per-host certificate; clients must use an isolated trust policy, and the E2E client disables verification because the mock certificate is not a public trust root.
 
+### Optional local decision model
+
+The optional `laya` Rust feature performs inference from a checkpoint directory already present on
+the machine. `dry-exec` does not fetch model weights during evaluation, and no model API is used as
+a fallback. Checkpoint acquisition is an operator-controlled step and should be verified and
+performed before an air-gapped run. If loading or inference fails, the caller must use the
+deterministic decision path; neural output never overrides a deterministic refusal.
+
 ## Threat & Isolation Model
 
 `dry-exec` provides an ephemeral execution primitive engineered to intercept and record state mutations produced by autonomous execution loops before changes commit to durable environments.

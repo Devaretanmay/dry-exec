@@ -272,3 +272,23 @@ Scope: Ephemeral execution boundary isolating process namespaces and syscall int
   CHECK: test -x scripts/build-wheels.sh && test -n "$(find target/release-wheels -maxdepth 1 -name '*.whl' -print -quit)" && rg -q "workflow_dispatch" .github/workflows/release.yml && echo wheel-build-local-and-ci-ready
   EXPECT: /wheel-build-local-and-ci-ready/
   EVIDENCE: scripts/build-wheels.sh passed on macOS and Linux container; produced installable `.whl` artifacts. GitHub workflow_dispatch remains configured for remote artifact confirmation.
+
+- [x] G61: Optional `laya` feature exposes a local-checkpoint `LayaScorer`; default builds remain deterministic-only.
+  CHECK: rg -q 'laya-rs = .*optional = true' crates/dry-exec-core/Cargo.toml && rg -q 'pub struct LayaScorer' crates/dry-exec-core/src/decision/laya_scorer.rs && echo laya-local-feature-present
+  EXPECT: /laya-local-feature-present/
+  EVIDENCE: Laya checkpoint is loaded from a caller-provided local directory; no implicit download path exists.
+
+- [x] G62: Laya `noul` output maps to the clamped `Score` primitive through `NeuralScoringStrategy`.
+  CHECK: rg -q 'Answer::Noul' crates/dry-exec-core/src/decision/laya_scorer.rs && rg -q 'Score::new\(scorer.score' crates/dry-exec-core/src/decision/mod.rs && echo laya-score-mapping-present
+  EXPECT: /laya-score-mapping-present/
+  EVIDENCE: Output is clamped to `[0.0, 1.0]`; inference errors retain deterministic routing.
+
+- [x] G63: Hybrid evaluation short-circuits deterministic refusals and blends allowed scores at 40/60.
+  CHECK: rg -q 'evaluate_with_neural' crates/dry-exec-core/src/decision/mod.rs && rg -q '!= Choice::Allowed' crates/dry-exec-core/src/decision/mod.rs && rg -q '0.4.*0.6' crates/dry-exec-core/src/decision/mod.rs && echo hybrid-fusion-present
+  EXPECT: /hybrid-fusion-present/
+  EVIDENCE: Neural scorer is not called for blocked or violated receipts; `None` is deterministic-only fallback.
+
+- [ ] G64: Full checkpoint inference meets a sub-20ms target on each supported hardware class.
+  CHECK: echo requires pinned local checkpoints and measured Apple Silicon/Linux benchmark evidence
+  EXPECT: /requires pinned local checkpoints/
+  EVIDENCE: Not claimed until hardware benchmark runs; upstream published latency is not a dry-exec measurement.

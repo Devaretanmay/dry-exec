@@ -10,7 +10,9 @@ pub mod delta;
 pub mod error;
 pub mod isolation;
 
-pub use decision::{evaluate, Choice, DecisionReceipt, DeltaSummary, Environment, Noul, Score};
+pub use decision::{
+    evaluate, evaluate_with_neural, Choice, DecisionReceipt, DeltaSummary, Environment, Noul, Score,
+};
 pub use delta::{
     AnonymousMemoryRegion, ByteDelta, DeltaCoordinator, FsMutation, InterceptedRequest,
     MockResponse, NetworkBoundary, NetworkMockSchema, PageMutation, StateDelta, TransparentProxy,

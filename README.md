@@ -191,6 +191,20 @@ asyncio.run(main())
 - **OpenTelemetry integration** — Structured JSON receipts and OTel span tracing
 - **Rich terminal visualization** — `DeltaLogger` renders memory/fs/network mutations
 
+### Optional local System-One scorer
+
+`dry-exec-core` includes an opt-in `laya` feature for local Laya inference through the published
+Rust `laya-rs` runtime. The feature loads a checkpoint from a caller-provided local directory;
+it never downloads weights implicitly. Deterministic boundary decisions remain first: blocked or
+violated actions do not invoke Laya, while allowed actions may blend deterministic risk (40%) with
+the local model score (60%). If checkpoint loading fails, callers can retain deterministic-only
+routing. This feature is disabled by default because Laya checkpoints are large and latency must
+be measured on the target hardware rather than assumed from upstream benchmarks.
+
+```bash
+cargo check -p dry-exec-core --features laya
+```
+
 ---
 
 ## Examples
