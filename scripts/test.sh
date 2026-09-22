@@ -9,7 +9,7 @@ else
 fi
 
 echo "==> Running Python verification tests..."
-python3 -m pytest tests/test_dex_ergonomics.py tests/test_examples.py tests/test_telemetry_agent.py tests/test_sdk.py -v
+    python3 -m pytest tests/test_dex_ergonomics.py tests/test_examples.py tests/test_telemetry_agent.py tests/test_sdk.py tests/test_real_execution.py -v
 
 echo "==> Verifying acceptance gates..."
 if command -v node >/dev/null 2>&1; then

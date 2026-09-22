@@ -34,6 +34,8 @@ impl Default for SeatbeltConfig {
                 PathBuf::from("/etc"),
                 PathBuf::from("/private/etc"),
                 PathBuf::from("/private/tmp"),
+                PathBuf::from("/private/var"),
+                PathBuf::from("/var"),
             ],
             allowed_write_paths: vec![PathBuf::from("/private/tmp/dex_ephemeral")],
             allow_loopback_network: true,
@@ -51,14 +53,22 @@ pub fn generate_seatbelt_profile(config: &SeatbeltConfig) -> String {
     // Standard compute and process capabilities
     if config.allow_process_exec {
         sbpl.push_str(";; Process execution within ephemeral boundary\n");
-        sbpl.push_str("(allow process-exec)\n");
+        sbpl.push_str("(allow process-exec (literal \"/bin/echo\"))\n");
+        sbpl.push_str("(allow process-exec (literal \"/bin/sh\"))\n");
+        sbpl.push_str("(allow process-exec (literal \"/usr/bin/python3\"))\n");
         sbpl.push_str("(allow process-fork)\n");
         sbpl.push_str("(allow sysctl-read)\n\n");
+        sbpl.push_str("(allow signal (target self))\n");
+        sbpl.push_str("\n");
     }
 
     // Terminal and standard descriptor IO
     sbpl.push_str(";; Terminal and standard device descriptors\n");
     sbpl.push_str("(allow file-read-data (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/urandom\") (literal \"/dev/dtracehelper\"))\n");
+    sbpl.push_str("(allow file-read* (literal \"/dev/null\"))\n");
+    sbpl.push_str("(allow file-read* (literal \"/dev/urandom\"))\n");
+    // dyld reads root directory entry during process startup.
+    sbpl.push_str("(allow file-read-data (literal \"/\"))\n");
     sbpl.push_str("(allow file-write-data (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/dtracehelper\"))\n");
     sbpl.push_str("(allow file-ioctl (literal \"/dev/dtracehelper\") (literal \"/dev/null\"))\n\n");
 
@@ -70,6 +80,11 @@ pub fn generate_seatbelt_profile(config: &SeatbeltConfig) -> String {
             path.display()
         ));
     }
+    sbpl.push_str("(allow file-read* (literal \"/bin/echo\"))\n");
+    sbpl.push_str("(allow file-read* (literal \"/bin/sh\"))\n");
+    sbpl.push_str("(allow file-read* (literal \"/usr/bin/python3\"))\n");
+    sbpl.push_str("(allow file-read* (subpath \"/usr/lib\"))\n");
+    sbpl.push_str("(allow file-read* (subpath \"/System/Library\"))\n");
     sbpl.push('\n');
 
     // Write paths strictly restricted to ephemeral scratch directory
@@ -141,7 +156,7 @@ mod tests {
 
         assert!(profile.contains("(version 1)"));
         assert!(profile.contains("(deny default)"));
-        assert!(profile.contains("(allow process-exec)"));
+        assert!(profile.contains("(allow process-exec (literal \"/bin/echo\"))"));
         assert!(profile.contains("(allow file-write* (subpath \"/private/tmp/dex_ephemeral\"))"));
         assert!(profile.contains("(allow network-outbound (to ip \"localhost:*\"))"));
         assert!(profile.contains(".ssh"));

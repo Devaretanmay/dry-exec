@@ -39,6 +39,7 @@ impl SyscallAction {
 pub struct SeccompFilter {
     default_action: SyscallAction,
     allowed_syscalls: Vec<i64>,
+    trapped_syscalls: Vec<i64>,
 }
 
 impl Default for SeccompFilter {
@@ -53,6 +54,7 @@ impl SeccompFilter {
         Self {
             default_action,
             allowed_syscalls: Vec::new(),
+            trapped_syscalls: Vec::new(),
         }
     }
 
@@ -60,6 +62,14 @@ impl SeccompFilter {
     pub fn allow(mut self, syscall_nr: i64) -> Self {
         if !self.allowed_syscalls.contains(&syscall_nr) {
             self.allowed_syscalls.push(syscall_nr);
+        }
+        self
+    }
+
+    /// Trap a specific syscall while allowing the remainder of the runtime surface.
+    pub fn trap(mut self, syscall_nr: i64) -> Self {
+        if !self.trapped_syscalls.contains(&syscall_nr) {
+            self.trapped_syscalls.push(syscall_nr);
         }
         self
     }
@@ -142,7 +152,23 @@ impl SeccompFilter {
             },
         ];
 
-        // 3. For each allowed syscall, compare and conditionally jump to ALLOW
+        // 3. Trap selected syscalls before evaluating the allow list.
+        for &syscall_nr in &self.trapped_syscalls {
+            filter.push(libc::sock_filter {
+                code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+                jt: 0,
+                jf: 0,
+                k: syscall_nr as u32,
+            });
+            filter.push(libc::sock_filter {
+                code: (libc::BPF_RET | libc::BPF_K) as u16,
+                jt: 0,
+                jf: 0,
+                k: libc::SECCOMP_RET_TRAP,
+            });
+        }
+
+        // 4. For each allowed syscall, compare and conditionally jump to ALLOW
         let n_rules = self.allowed_syscalls.len();
         for (i, &syscall_nr) in self.allowed_syscalls.iter().enumerate() {
             let jump_offset_to_allow = (n_rules - 1 - i + 1) as u8;
@@ -154,7 +180,7 @@ impl SeccompFilter {
             });
         }
 
-        // 4. Fallthrough: Default action (e.g. SECCOMP_RET_TRAP)
+        // 5. Fallthrough: Default action (e.g. SECCOMP_RET_TRAP)
         filter.push(libc::sock_filter {
             code: (libc::BPF_RET | libc::BPF_K) as u16,
             jt: 0,
@@ -162,7 +188,7 @@ impl SeccompFilter {
             k: self.default_action.to_seccomp_ret(),
         });
 
-        // 5. Whitelisted target: SECCOMP_RET_ALLOW
+        // 6. Whitelisted target: SECCOMP_RET_ALLOW
         filter.push(libc::sock_filter {
             code: (libc::BPF_RET | libc::BPF_K) as u16,
             jt: 0,

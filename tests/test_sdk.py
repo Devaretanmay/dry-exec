@@ -68,7 +68,14 @@ async def test_assertion_b_successful_ffi_execution():
         action_id="act_valid_002",
         target_resource="balance",
         mutation_type="increment",
-        payload={"amount": 100},
+        payload={
+            "amount": 100,
+            "command": [
+                "/bin/sh",
+                "-c",
+                "printf 'real execution\\n' > /tmp/dry_exec_ephemeral/sdk.txt",
+            ],
+        },
     )
 
     client = DryExecClient()
@@ -76,12 +83,8 @@ async def test_assertion_b_successful_ffi_execution():
     delta: StateDelta = await client.execute_ephemeral_action(env, valid_action)
 
     assert isinstance(delta, StateDelta)
-    assert delta.total_bytes_mutated >= 4
-    assert len(delta.memory_mutations) >= 1
-    # Verify Page 0 mutation contents
-    page0 = delta.memory_mutations[0]
-    assert page0.page_index == 0
-    assert page0.deltas[0].mutated == b"\xde\xad\xbe\xef"
+    assert delta.exit_code == 0
+    assert any(m.path.endswith("sdk.txt") for m in delta.fs_mutations)
 
 
 @pytest.mark.asyncio

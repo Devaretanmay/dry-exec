@@ -486,9 +486,18 @@ where
     if ready_byte == BOUNDARY_READY {
         // Reset kernel page-table tracking for child: write "4\n" to /proc/[pid]/clear_refs
         let clear_refs_path = format!("/proc/{}/clear_refs", child_pid);
-        if let Ok(mut file) = std::fs::File::create(&clear_refs_path) {
-            use std::io::Write;
-            let _ = file.write_all(b"4\n");
+        let clear_result = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&clear_refs_path)
+            .and_then(|mut file| {
+                use std::io::Write;
+                file.write_all(b"4\n")
+            });
+        if let Err(error) = clear_result {
+            terminate_child(pid);
+            return Err(IsolationError::SyncError(format!(
+                "Failed to reset soft-dirty tracking for child {child_pid}: {error}"
+            )));
         }
 
         // Send ACK byte to release child into action execution

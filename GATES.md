@@ -252,3 +252,23 @@ Scope: Ephemeral execution boundary isolating process namespaces and syscall int
   CHECK: ! grep -rniE "\b(policy|policies|guardian|guardrail|guardrails|shield|secure|security|slop)\b|AI agent|(^|[^-])safe(ly)?\b" crates/dry-exec-core/src/decision/ python/dry_exec/decision.py docs/architecture/loop13-decision-layer-design.md tests/test_decision.py && echo "loop13-linguistic-audit-clean"
   EXPECT: /loop13-linguistic-audit-clean/
   EVIDENCE: loop13-linguistic-audit-clean
+
+- [x] G57: Rust FFI accepts a real command vector and executes it after the native boundary is applied.
+  CHECK: rg -q "command: Option<Vec<String>>" crates/dry-exec-pyo3/src/lib.rs && rg -q "Command::new" crates/dry-exec-pyo3/src/lib.rs && ! rg -q "let _ = \(action_json, memory_size\)" crates/dry-exec-pyo3/src/lib.rs && echo command-vector-wired
+  EXPECT: /command-vector-wired/
+  EVIDENCE: Linux real-command E2E passed; vector reaches isolated child and returns exit status.
+
+- [x] G58: Python command and decorator paths return isolated stdout, stderr, and exit code.
+  CHECK: rg -q "exit_code" python/dry_exec/client.py python/dry_exec/models.py && rg -q "stdout" crates/dry-exec-pyo3/src/lib.rs && echo stream-capture-wired
+  EXPECT: /stream-capture-wired/
+  EVIDENCE: Linux real-command E2E passed; stdout, stderr, and exit_code surfaced in StateDelta.
+
+- [x] G59: Real Linux workload tests prove command output and filesystem mutations remain inside the boundary.
+  CHECK: test -f tests/test_real_execution.py && rg -q "stdout|fs_mutations|exit_code" tests/test_real_execution.py && echo real-workload-tests-present
+  EXPECT: /real-workload-tests-present/
+  EVIDENCE: Linux privileged E2E passed: filesystem, nonzero exit, and transparent HTTP proxy tests.
+
+- [x] G60: Wheel artifact generation is validated locally; CI workflow_dispatch is configured for the same release matrix.
+  CHECK: test -x scripts/build-wheels.sh && test -n "$(find target/release-wheels -maxdepth 1 -name '*.whl' -print -quit)" && rg -q "workflow_dispatch" .github/workflows/release.yml && echo wheel-build-local-and-ci-ready
+  EXPECT: /wheel-build-local-and-ci-ready/
+  EVIDENCE: scripts/build-wheels.sh passed on macOS and Linux container; produced installable `.whl` artifacts. GitHub workflow_dispatch remains configured for remote artifact confirmation.

@@ -1,4 +1,31 @@
-# Security & Kernel Isolation Model
+# Trust Center
+
+`dry-exec` is an execution boundary for exploring proposed agent actions. It reduces blast radius; it does not make arbitrary code trustworthy or replace production change control.
+
+## Scope and assumptions
+
+- Treat action payloads and command output as untrusted.
+- Review returned `StateDelta` before committing durable changes.
+- Run Linux kernel tests with the documented privileged harness.
+- Keep secrets outside trial inputs and environment variables unless a specific test requires them.
+
+## Threat model
+
+### Prompt injection
+
+Prompt injection can cause an agent to propose an unintended command, target, or endpoint. dry-exec validates the proposed action against the configured target and endpoint schema, then reports the resulting delta. It does not determine whether the agent’s intent is legitimate. Human or application-level approval remains required for durable commit.
+
+### Secret access
+
+The boundary limits filesystem and network access, including explicit secret-path denials in the macOS profile. This is not a guarantee that every application-specific secret location is known. Do not mount secret stores into a trial unless required and reviewed.
+
+### Escape vectors
+
+Relevant escape classes include kernel vulnerabilities, namespace configuration errors, Seatbelt profile errors, unsafe native FFI, device access, and dependency compromise. The project reduces exposure with Linux namespaces, seccomp, macOS Seatbelt, isolated filesystem handling, and focused regression tests. Keep host kernels, Python, Rust, and dependencies patched.
+
+### Network leakage
+
+Registered HTTP routes return deterministic responses through the local proxy. Unregistered routes are recorded as schema breaches. HTTPS `CONNECT` is terminated with an ephemeral per-host certificate; clients must use an isolated trust policy, and the E2E client disables verification because the mock certificate is not a public trust root.
 
 ## Threat & Isolation Model
 

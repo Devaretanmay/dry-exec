@@ -178,6 +178,13 @@ class DryExecClient:
             environment.max_risk_threshold,
         )
 
+        raw_command = action.payload.get("command")
+        command = None
+        if isinstance(raw_command, list):
+            command = [str(part) for part in raw_command]
+        elif isinstance(raw_command, str) and raw_command.strip():
+            command = ["/bin/sh", "-c", raw_command]
+
         # 3. Asynchronously dispatch blocking kernel operations to maintain event loop liveness
         try:
             raw_delta: Dict[str, Any] = await asyncio.to_thread(
@@ -189,6 +196,7 @@ class DryExecClient:
                 mock_endpoints_tuples,
                 request_to_trigger,
                 decision_thresholds,
+                command,
             )
         except Exception as exc:
             exc_type = type(exc).__name__
@@ -255,5 +263,8 @@ class DryExecClient:
             schema_breaches=raw_delta.get("schema_breaches", 0),
             total_bytes_mutated=raw_delta.get("total_bytes_mutated", 0),
             duration_nanos=raw_delta.get("duration_nanos", 0),
+            stdout=bytes(raw_delta.get("stdout", b"")),
+            stderr=bytes(raw_delta.get("stderr", b"")),
+            exit_code=raw_delta.get("exit_code", 0),
             decision=parse_decision(raw_delta.get("decision")),
         )

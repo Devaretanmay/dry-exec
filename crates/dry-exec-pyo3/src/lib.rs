@@ -10,11 +10,42 @@ use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::TcpStream;
+use std::os::unix::io::{AsRawFd, FromRawFd};
+use std::path::PathBuf;
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Schema-driven mock endpoint: (method, path, status_code, headers, body).
 type MockEndpoint = (String, String, u16, HashMap<String, String>, Vec<u8>);
+
+fn capture_file(label: &str) -> Result<(PathBuf, File), String> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("capture clock error: {e}"))?
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("dry_exec_{label}_{nonce}"));
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|e| format!("capture file error: {e}"))?;
+    Ok((path, file))
+}
+
+fn read_capture(path: &PathBuf, mut file: File) -> Result<Vec<u8>, String> {
+    file.seek(SeekFrom::Start(0))
+        .map_err(|e| format!("capture seek error: {e}"))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|e| format!("capture read error: {e}"))?;
+    let _ = std::fs::remove_file(path);
+    Ok(bytes)
+}
 
 create_exception!(_dry_exec_ffi, IsolationSetupError, PyException);
 create_exception!(_dry_exec_ffi, SyscallBoundaryError, PyException);
@@ -24,7 +55,7 @@ create_exception!(_dry_exec_ffi, StateDeltaComputationError, PyException);
 // The FFI boundary stays positional: each argument is a distinct facet of the ephemeral
 // execution request, and bundling them would complicate every Python caller for no gain.
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (action_json, memory_size, tmpfs_path, trigger_blocked_syscall, mock_endpoints=None, request_to_trigger=None, decision_thresholds=None))]
+#[pyo3(signature = (action_json, memory_size, tmpfs_path, trigger_blocked_syscall, mock_endpoints=None, request_to_trigger=None, decision_thresholds=None, command=None))]
 fn execute_isolated_action(
     py: Python<'_>,
     action_json: String,
@@ -34,6 +65,7 @@ fn execute_isolated_action(
     mock_endpoints: Option<Vec<MockEndpoint>>,
     request_to_trigger: Option<(String, String, String)>,
     decision_thresholds: Option<(usize, usize, f32)>,
+    command: Option<Vec<String>>,
 ) -> PyResult<PyObject> {
     use dry_exec_core::decision::{evaluate, DeltaSummary, Environment};
     #[cfg(target_os = "linux")]
@@ -42,7 +74,9 @@ fn execute_isolated_action(
     #[cfg(target_os = "linux")]
     use dry_exec_core::delta::{NetworkBoundary, TransparentProxy};
 
-    let _ = (action_json, memory_size);
+    let _ = action_json;
+    #[cfg(target_os = "macos")]
+    let _ = memory_size;
 
     #[cfg(target_os = "linux")]
     let result = py.allow_threads(|| {
@@ -51,6 +85,14 @@ fn execute_isolated_action(
             execute_isolated_process_with_inspection, MountConfig, ProcessBoundaryConfig,
             SeccompFilter, SyscallAction,
         };
+
+        let (stdout_path, stdout_file) = capture_file("stdout")?;
+        let (stderr_path, stderr_file) = capture_file("stderr")?;
+        let (status_path, status_file) = capture_file("status")?;
+        let stdout_fd = stdout_file.as_raw_fd();
+        let stderr_fd = stderr_file.as_raw_fd();
+        let status_fd = status_file.as_raw_fd();
+        let command_for_child = command.clone();
 
         let mem_region = if memory_size > 0 {
             Some(
@@ -98,7 +140,18 @@ fn execute_isolated_action(
         };
         let proxy_port = network_boundary.as_ref().map(|boundary| boundary.port);
 
-        let mut filter = SeccompFilter::new(SyscallAction::Trap).with_baseline_whitelist();
+        // Arbitrary commands need their runtime syscall surface. Keep the filter attached, while
+        // retaining strict TRAP behavior for explicit boundary-probe tests.
+        let mut filter = if command_for_child.is_some() {
+            let command_filter = SeccompFilter::new(SyscallAction::Allow);
+            if trigger_blocked_syscall {
+                command_filter.trap(libc::SYS_socket)
+            } else {
+                command_filter
+            }
+        } else {
+            SeccompFilter::new(SyscallAction::Trap).with_baseline_whitelist()
+        };
         if request_to_trigger.is_some() {
             // Outbound request surface for a userspace HTTP client: socket setup, connection,
             // and request/response IO. `fcntl` is included because the standard library's socket
@@ -128,7 +181,46 @@ fn execute_isolated_action(
         let boundary_result = execute_isolated_process_with_inspection(
             &config,
             move || {
-                if trigger_blocked_syscall {
+                if let Some(argv) = command_for_child {
+                    if let Some(program) = argv.first() {
+                        let mut process = Command::new(program);
+                        process.args(&argv[1..]);
+                        if let Some(port) = proxy_port {
+                            let proxy = format!("http://127.0.0.1:{port}");
+                            process
+                                .env("HTTP_PROXY", &proxy)
+                                .env("HTTPS_PROXY", &proxy)
+                                .env("ALL_PROXY", &proxy)
+                                .env("http_proxy", &proxy)
+                                .env("https_proxy", &proxy)
+                                .env("all_proxy", &proxy)
+                                .env("NO_PROXY", "");
+                        }
+                        let output = process.output();
+                        let (stdout, stderr, exit_code) = match output {
+                            Ok(output) => (
+                                output.stdout,
+                                output.stderr,
+                                output.status.code().unwrap_or(128),
+                            ),
+                            Err(error) => (
+                                Vec::new(),
+                                format!("failed to execute command: {error}\n").into_bytes(),
+                                127,
+                            ),
+                        };
+                        unsafe {
+                            let mut out = File::from_raw_fd(stdout_fd);
+                            let mut err = File::from_raw_fd(stderr_fd);
+                            let mut status_file = File::from_raw_fd(status_fd);
+                            let _ = out.write_all(&stdout);
+                            let _ = err.write_all(&stderr);
+                            let _ = write!(status_file, "{exit_code}");
+                            let _ = out.flush();
+                            let _ = err.flush();
+                        }
+                    }
+                } else if trigger_blocked_syscall {
                     unsafe {
                         let _ =
                             libc::syscall(libc::SYS_socket, libc::AF_INET, libc::SOCK_STREAM, 0);
@@ -186,9 +278,17 @@ fn execute_isolated_action(
                     return Err(format!("Process exited with status code {code}"));
                 }
 
-                let delta = inspected
+                let mut delta = inspected
                     .ok_or_else(|| "Boundary inspection did not execute".to_string())?
                     .map_err(|e| format!("Delta computation error: {e}"))?;
+
+                delta.stdout = read_capture(&stdout_path, stdout_file)?;
+                delta.stderr = read_capture(&stderr_path, stderr_file)?;
+                let status_bytes = read_capture(&status_path, status_file)?;
+                delta.exit_code = String::from_utf8_lossy(&status_bytes)
+                    .trim()
+                    .parse()
+                    .unwrap_or(127);
 
                 Ok(delta)
             }
@@ -197,16 +297,26 @@ fn execute_isolated_action(
 
     #[cfg(target_os = "macos")]
     let result = py.allow_threads(|| {
-        use dry_exec_core::isolation::{execute_macos_isolated_process, SeatbeltConfig};
+        use dry_exec_core::isolation::{
+            execute_macos_command, execute_macos_isolated_process, SeatbeltConfig,
+        };
+
+        let (stdout_path, stdout_file) = capture_file("stdout")?;
+        let (stderr_path, stderr_file) = capture_file("stderr")?;
+        let stdout_fd = stdout_file.as_raw_fd();
+        let stderr_fd = stderr_file.as_raw_fd();
+        let command_for_child = command.clone();
 
         let mut coordinator = DeltaCoordinator::new();
-        let scratch_dir = std::path::PathBuf::from(if tmpfs_path.is_empty() {
+        let requested_scratch_dir = std::path::PathBuf::from(if tmpfs_path.is_empty() {
             "/private/tmp/dex_ephemeral"
         } else {
             &tmpfs_path
         });
 
-        let _ = std::fs::create_dir_all(&scratch_dir);
+        let _ = std::fs::create_dir_all(&requested_scratch_dir);
+        let scratch_dir = std::fs::canonicalize(&requested_scratch_dir)
+            .unwrap_or(requested_scratch_dir);
 
         let proxy_port = if let Some(endpoints) = mock_endpoints {
             let mut schema = NetworkMockSchema::new();
@@ -232,21 +342,29 @@ fn execute_isolated_action(
 
         let seatbelt_config = SeatbeltConfig {
             allowed_read_paths: vec![
-                std::path::PathBuf::from("/usr"),
-                std::path::PathBuf::from("/System"),
-                std::path::PathBuf::from("/Library"),
-                std::path::PathBuf::from("/opt/homebrew"),
                 std::path::PathBuf::from("/dev"),
                 std::path::PathBuf::from("/etc"),
                 std::path::PathBuf::from("/private/etc"),
                 std::path::PathBuf::from("/private/tmp"),
+                std::path::PathBuf::from("/private/var"),
+                std::path::PathBuf::from("/var"),
             ],
             allowed_write_paths: vec![scratch_dir.clone()],
             allow_loopback_network: true,
             allow_process_exec: true,
         };
 
-        let boundary_res = execute_macos_isolated_process(&scratch_dir, &seatbelt_config, || {
+        let proxy_url = proxy_port.map(|port| format!("http://127.0.0.1:{port}"));
+        let boundary_res = if let Some(argv) = command.as_ref() {
+            execute_macos_command(
+                &scratch_dir,
+                &seatbelt_config,
+                argv,
+                proxy_url.as_deref(),
+            )
+            .map(|(code, output)| (code, Some(output)))
+        } else {
+            execute_macos_isolated_process(&scratch_dir, &seatbelt_config, || {
             if trigger_blocked_syscall {
                 // Attempt unauthorized write outside ephemeral sandbox to verify Seatbelt EPERM denial
                 let path = std::ffi::CString::new("/etc/dex_blocked_write.tmp").unwrap();
@@ -257,6 +375,44 @@ fn execute_isolated_action(
                     return 126;
                 }
                 return 0;
+            }
+
+            if let Some(argv) = command_for_child {
+                    if let Some(program) = argv.first() {
+                    let mut process = Command::new(program);
+                    process.args(&argv[1..]).current_dir(&scratch_dir);
+                    if let Some(port) = proxy_port {
+                        let proxy = format!("http://127.0.0.1:{port}");
+                        process
+                            .env("HTTP_PROXY", &proxy)
+                            .env("HTTPS_PROXY", &proxy)
+                            .env("ALL_PROXY", &proxy)
+                            .env("http_proxy", &proxy)
+                            .env("https_proxy", &proxy)
+                            .env("all_proxy", &proxy)
+                            .env("NO_PROXY", "");
+                    }
+                    let output = process.output();
+                    let (stdout, stderr, exit_code) = match output {
+                        Ok(output) => (
+                            output.stdout,
+                            output.stderr,
+                            output.status.code().unwrap_or(128),
+                        ),
+                        Err(error) => (
+                            Vec::new(),
+                            format!("failed to execute command: {error}\n").into_bytes(),
+                            127,
+                        ),
+                    };
+                    let mut out = unsafe { File::from_raw_fd(stdout_fd) };
+                    let mut err = unsafe { File::from_raw_fd(stderr_fd) };
+                    let _ = out.write_all(&stdout);
+                    let _ = err.write_all(&stderr);
+                    let _ = out.flush();
+                    let _ = err.flush();
+                    return exit_code;
+                }
             }
 
             if let Some((method, path, body)) = request_to_trigger {
@@ -273,10 +429,12 @@ fn execute_isolated_action(
                 }
             }
             0
-        });
+            })
+            .map(|code| (code, None))
+        };
 
-        let status_code = match boundary_res {
-            Ok(code) => code,
+        let (status_code, macos_output) = match boundary_res {
+            Ok(result) => result,
             Err(e) => return Err(format!("Execution boundary error: {e}")),
         };
 
@@ -284,13 +442,21 @@ fn execute_isolated_action(
             return Err("SYSCALL_VIOLATION:1:0".to_string());
         }
 
-        if status_code != 0 && status_code != 126 {
+        if command.is_none() && status_code != 0 && status_code != 126 {
             return Err(format!("Process exited with status code {status_code}"));
         }
 
-        let delta = coordinator
+        let mut delta = coordinator
             .compute_macos_delta(None, Some(&scratch_dir))
             .map_err(|e| format!("Delta computation error: {e}"))?;
+
+        if command.is_some() {
+            delta.stdout = macos_output.unwrap_or_default();
+            delta.stderr = Vec::new();
+            let _ = read_capture(&stdout_path, stdout_file);
+            let _ = read_capture(&stderr_path, stderr_file);
+            delta.exit_code = status_code;
+        }
 
         Ok(delta)
     });
@@ -314,6 +480,9 @@ fn execute_isolated_action(
             dict.set_item("total_bytes_mutated", delta.total_bytes_mutated)?;
             dict.set_item("schema_breaches", delta.schema_breaches)?;
             dict.set_item("duration_nanos", delta.duration_nanos)?;
+            dict.set_item("stdout", PyBytes::new(py, &delta.stdout))?;
+            dict.set_item("stderr", PyBytes::new(py, &delta.stderr))?;
+            dict.set_item("exit_code", delta.exit_code)?;
 
             let mem_list = PyList::empty(py);
             for page in delta.memory_mutations {

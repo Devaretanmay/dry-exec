@@ -18,19 +18,28 @@ Explore state mutations without consequences. Commit only what you approve.
 
 ## What is dry-exec?
 
-`dry-exec` is a **deterministic state exploration primitive** for autonomous execution loops. It intercepts proposed mutations, runs them inside ephemeral kernel sandboxes, and returns the exact state delta — without ever touching your real environment.
+One AI agent is a cool demo. Running 100 in production is a state-management problem:
 
-Think of it as `git diff` for arbitrary runtime state: memory, filesystem, and network — computed at the kernel level.
+- commands can write files before review;
+- migration code can touch the wrong database;
+- API calls can leak real credentials or spend real money;
+- rollback becomes someone’s pager.
 
-### Why?
+`dry-exec` gives each proposed action an ephemeral trial. The action runs behind native Linux or macOS boundaries. The SDK returns a structured `StateDelta` containing observed memory, filesystem, network, stdout, stderr, and exit-code changes. You review that receipt before committing anything durable.
 
-| Problem | dry-exec |
+The useful mental model: `git diff` for a runtime action.
+
+### What it covers
+
+| Production risk | Trial result |
 |---|---|
-| Autonomous loops mutate state blindly | Every mutation runs in an isolated kernel sandbox first |
-| Rollback is expensive and error-prone | Nothing to roll back — baseline is never touched |
-| State diffing requires app-level hashing | Kernel soft-dirty pagemap tracking & APFS CoW: $O(P_{\text{dirty}})$ |
-| Network calls leak to production | Transparent proxy returns deterministic mock responses |
-| Requires Docker on developer laptops | **Zero Docker needed** — native on both Linux and macOS |
+| Unreviewed filesystem writes | Isolated filesystem mutation list |
+| Failed command hidden behind a wrapper | Captured stdout, stderr, and exit code |
+| Real API call during exploration | Schema-driven HTTP mock proxy |
+| Host changes during a dry run | Linux namespaces or macOS Seatbelt/APFS boundaries |
+| Agent decision made from raw logs | Typed `StateDelta` and decision receipt |
+
+Linux real-command execution and HTTP/HTTPS mock interception are verified in the container harness. macOS `/bin/echo` real-command execution is covered by native E2E.
 
 ---
 

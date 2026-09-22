@@ -104,7 +104,15 @@ impl DeltaCoordinator {
 
         // 2. Compute filesystem mutations via snapshot comparison
         let fs_mutations = if let Some(ref snapshot) = self.fs_snapshot {
-            snapshot.compute_delta()?
+            let child_root = Path::new("/proc")
+                .join(child_pid.to_string())
+                .join("root")
+                .join(snapshot.root.strip_prefix("/").unwrap_or(&snapshot.root));
+            if child_root.exists() {
+                snapshot.compute_delta_at(&child_root)?
+            } else {
+                snapshot.compute_delta()?
+            }
         } else {
             Vec::new()
         };
@@ -154,6 +162,9 @@ impl DeltaCoordinator {
             schema_breaches,
             total_bytes_mutated: total_bytes,
             duration_nanos,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exit_code: 0,
         })
     }
 
@@ -210,6 +221,9 @@ impl DeltaCoordinator {
             schema_breaches,
             total_bytes_mutated: total_bytes,
             duration_nanos,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exit_code: 0,
         })
     }
 }

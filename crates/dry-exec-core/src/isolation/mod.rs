@@ -27,6 +27,6 @@ pub mod macos_process;
 pub mod macos_seatbelt;
 
 #[cfg(target_os = "macos")]
-pub use macos_process::execute_macos_isolated_process;
+pub use macos_process::{execute_macos_command, execute_macos_isolated_process};
 #[cfg(target_os = "macos")]
 pub use macos_seatbelt::{apply_seatbelt_profile, generate_seatbelt_profile, SeatbeltConfig};

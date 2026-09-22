@@ -9,6 +9,7 @@ use std::os::unix::fs::FileExt;
 const PAGEMAP_ENTRY_SIZE: usize = 8;
 const PAGE_PRESENT_BIT: u64 = 1 << 63;
 const PAGE_SOFT_DIRTY_BIT: u64 = 1 << 55;
+const PAGE_EXCLUSIVE_BIT: u64 = 1 << 56;
 
 /// Inspects /proc/[pid]/pagemap to compute deterministic memory mutations.
 pub fn scan_dirty_pages(
@@ -38,6 +39,11 @@ pub fn scan_dirty_pages(
 
     let mut mutations = Vec::new();
     let mut child_page_buf = [0u8; PAGE_SIZE];
+    let local_pid = std::process::id() as i32 == pid;
+    let soft_dirty_available = descriptors.chunks_exact(PAGEMAP_ENTRY_SIZE).any(|bytes| {
+        let entry = u64::from_le_bytes(bytes.try_into().unwrap());
+        entry & PAGE_SOFT_DIRTY_BIT != 0
+    });
 
     for page_idx in 0..num_pages {
         let entry_offset = page_idx * PAGEMAP_ENTRY_SIZE;
@@ -50,22 +56,32 @@ pub fn scan_dirty_pages(
         // Explicitly check Bit 63 (PAGE_PRESENT) before Bit 55 (PAGE_SOFT_DIRTY)
         let is_present = (entry & PAGE_PRESENT_BIT) != 0;
         let is_soft_dirty = (entry & PAGE_SOFT_DIRTY_BIT) != 0;
+        // Some hardened kernels expose the exclusive/COW bit while masking soft-dirty. In a
+        // forked boundary, a private page becomes exclusive exactly when the child writes it.
+        // Use that signal only when the kernel exposes no soft-dirty bits at all.
+        let is_exclusive = (entry & PAGE_EXCLUSIVE_BIT) != 0;
+        let candidate = is_soft_dirty || (!soft_dirty_available && is_exclusive);
 
-        if is_present && is_soft_dirty {
+        if is_present && candidate {
             let page_addr = base_addr + (page_idx * PAGE_SIZE);
             let region_offset = page_idx * PAGE_SIZE;
             let page_len = std::cmp::min(PAGE_SIZE, region_len.saturating_sub(region_offset));
 
-            // Read the child's mutated page into scratch buffer
-            read_process_memory(pid, page_addr, &mut child_page_buf[..page_len])?;
-
             // Zero-copy diffing directly against parent's mapped memory slice
             let parent_page_slice = &parent_baseline[region_offset..region_offset + page_len];
-            let page_deltas = compute_slice_deltas(
-                region_offset,
-                parent_page_slice,
-                &child_page_buf[..page_len],
-            );
+            let page_deltas = if local_pid {
+                // Same-process benchmark path: avoid one process_vm_readv syscall per page.
+                let local_page =
+                    unsafe { std::slice::from_raw_parts(page_addr as *const u8, page_len) };
+                compute_slice_deltas(region_offset, parent_page_slice, local_page)
+            } else {
+                read_process_memory(pid, page_addr, &mut child_page_buf[..page_len])?;
+                compute_slice_deltas(
+                    region_offset,
+                    parent_page_slice,
+                    &child_page_buf[..page_len],
+                )
+            };
 
             if !page_deltas.is_empty() {
                 mutations.push(PageMutation {
@@ -86,6 +102,19 @@ fn compute_slice_deltas(
     baseline: &[u8],
     mutated: &[u8],
 ) -> Vec<ByteDelta> {
+    if baseline.len() == mutated.len()
+        && baseline.len() > 0
+        && unsafe {
+            libc::memcmp(
+                baseline.as_ptr() as *const libc::c_void,
+                mutated.as_ptr() as *const libc::c_void,
+                baseline.len(),
+            )
+        } == 0
+    {
+        return Vec::new();
+    }
+
     let mut deltas = Vec::new();
     let mut in_diff = false;
     let mut diff_start = 0;

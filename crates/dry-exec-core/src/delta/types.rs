@@ -65,6 +65,12 @@ pub struct StateDelta {
     pub total_bytes_mutated: usize,
     /// State delta computation duration in nanoseconds.
     pub duration_nanos: u64,
+    /// Captured stdout emitted by the isolated action.
+    pub stdout: Vec<u8>,
+    /// Captured stderr emitted by the isolated action.
+    pub stderr: Vec<u8>,
+    /// Exit status returned by the isolated action.
+    pub exit_code: i32,
 }
 
 impl StateDelta {

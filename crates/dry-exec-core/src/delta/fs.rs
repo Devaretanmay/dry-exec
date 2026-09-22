@@ -43,9 +43,14 @@ impl FsSnapshot {
 
     /// Compute deterministic filesystem state delta against post-execution state.
     pub fn compute_delta(&self) -> Result<Vec<FsMutation>, DeltaError> {
+        self.compute_delta_at(&self.root)
+    }
+
+    /// Compute delta from a mounted view of the same root, such as `/proc/<pid>/root/...`.
+    pub fn compute_delta_at(&self, current_root: &Path) -> Result<Vec<FsMutation>, DeltaError> {
         let mut current_records = HashMap::new();
-        if self.root.exists() {
-            traverse_dir(&self.root, &self.root, &mut current_records)?;
+        if current_root.exists() {
+            traverse_dir(current_root, current_root, &mut current_records)?;
         }
 
         let mut mutations = Vec::new();

@@ -1,0 +1,891 @@
+
+===== README.md =====
+
+<div align="center">
+
+# dry-exec
+
+**Deterministic ephemeral execution primitive for autonomous loops.**
+
+Explore state mutations without consequences. Commit only what you approve.
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
+[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-green.svg)](#architecture)
+[![CI](https://github.com/Devaretanmay/dry-exec/actions/workflows/ci.yml/badge.svg)](https://github.com/Devaretanmay/dry-exec/actions/workflows/ci.yml)
+
+</div>
+
+---
+
+## What is dry-exec?
+
+One AI agent is a cool demo. Running 100 in production is a state-management problem:
+
+- commands can write files before review;
+- migration code can touch the wrong database;
+- API calls can leak real credentials or spend real money;
+- rollback becomes someone’s pager.
+
+`dry-exec` gives each proposed action an ephemeral trial. The action runs behind native Linux or macOS boundaries. The SDK returns a structured `StateDelta` containing observed memory, filesystem, network, stdout, stderr, and exit-code changes. You review that receipt before committing anything durable.
+
+The useful mental model: `git diff` for a runtime action.
+
+### What it covers
+
+| Production risk | Trial result |
+|---|---|
+| Unreviewed filesystem writes | Isolated filesystem mutation list |
+| Failed command hidden behind a wrapper | Captured stdout, stderr, and exit code |
+| Real API call during exploration | Schema-driven HTTP mock proxy |
+| Host changes during a dry run | Linux namespaces or macOS Seatbelt/APFS boundaries |
+| Agent decision made from raw logs | Typed `StateDelta` and decision receipt |
+
+Linux real-command execution and HTTP/HTTPS mock interception are verified in the container harness. macOS `/bin/echo` real-command execution is covered by native E2E.
+
+---
+
+## Installation
+
+```bash
+pip install dry-exec
+```
+
+---
+
+## Quickstart
+
+### Path 1: The `dex` CLI (Direct Command Execution)
+
+Run any command directly in an ephemeral sandbox without YAML or Docker (`de` and `dry-exec` also supported as aliases):
+
+```bash
+# Dry-run: inspect the state delta without modifying host
+dex "python migrate.py"
+
+# Commit changes only if the dry-run delta looks right
+dex --commit "npm run seed"
+
+# Inspect active environment limits and boundary rules
+dex inspect --config env.yaml
+```
+
+```
+$ dex "python dangerous_script.py"
+
+╭──────────────── Ephemeral State Exploration: Proposed Action ────────────────╮
+│ Environment     cli_ephemeral_sandbox                                        │
+│ Action ID       cmd_7f2b1a                                                   │
+│ Target Resource shell_command                                                │
+│ Mutation Type   execute                                                      │
+│ Payload         {'command': 'python dangerous_script.py'}                    │
+╰──────────────────── Pre-Execution Boundary Verification ─────────────────────╯
+╭─────────────────────── State Delta Receipt (Trial #1) ───────────────────────╮
+│ Metric                           Count / Value                               │
+│ ──────────────────────────────────────────────────────────────────────────── │
+│ Memory Pages Mutated             N/A (macOS bare-metal; Linux pagemap only)  │
+│ Filesystem Changes               3 inodes (APFS CoW snapshot)                │
+│ Network Requests Intercepted     1 request intercepted (Stripe mock proxy)   │
+│ Total Mutated Bytes              4,096 bytes                                 │
+│ Computation Latency              0.320 ms (sub-millisecond native kernel)    │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+Commit state delta to target environment? [y/N]: n
+[Real host and live APIs remain untouched.]
+```
+
+<br>
+
+### Path 2: The `@dry_exec.dry_run` Decorator
+
+Wrap any function to run inside an ephemeral kernel sandbox. Returns the computed `StateDelta`:
+
+```python
+import dry_exec
+
+@dry_exec.dry_run
+def update_balance(account_id: str, amount: int):
+    # Runs in ephemeral sandbox; database is untouched
+    db.execute("UPDATE accounts SET balance = balance + $1 WHERE id = $2", amount, account_id)
+
+delta = update_balance("acc_101", 500)
+print(f"{delta.total_bytes_mutated} bytes mutated in {delta.duration_nanos}ns")
+```
+
+Or execute directly with functional `dry_exec.run()`:
+
+```python
+delta = dry_exec.run("python seed_data.py")
+```
+
+
+<br>
+
+### Path 3: The 3-Line Autonomous Agent Loop
+
+Let an autonomous execution loop propose actions, test them ephemerally, evaluate state deltas, and self-correct:
+
+```python
+import asyncio
+from dry_exec import Agent
+
+async def main():
+    agent = Agent(task="Clean up old temp files and migrate user records")
+    result = await agent.run()
+
+    print(f"Success: {result.success}, Trials: {result.trials_conducted}, Committed: {result.committed}")
+
+asyncio.run(main())
+```
+
+---
+
+## Architecture: Dual-Backend Engine
+
+`dry-exec` features a **native dual-backend architecture**. It automatically detects the host operating system and compiles to native kernel primitives with sub-millisecond execution latencies:
+
+```
+                            dry-exec Architecture
+                                      │
+            ┌─────────────────────────┴─────────────────────────┐
+            ▼                                                   ▼
+      Linux Backend                                       macOS Backend
+   (Production & Cloud)                                (Local Development)
+─────────────────────────                           ─────────────────────────
+• Linux Namespaces (PID, NET, MNT)                  • Apple Seatbelt (sandbox_init)
+• seccomp-BPF TRAP filter                           • APFS Copy-on-Write (clonefile)
+• /proc/[pid]/pagemap soft-dirty                    • Transparent Loopback Proxy
+• Zero Docker needed                                • Zero Docker needed
+```
+
+```
+  Autonomous Execution Loop (Python SDK)
+  ┌──────────────────────────────────────────────┐
+  │  @dry_exec.dry_run or Agent(task=...).run()  │
+  │  Async FFI dispatch (GIL released)           │
+  │  Structured telemetry + OTel spans           │
+  └──────────────┬───────────────────────────────┘
+                 │ PyO3 FFI / `dex` CLI
+                 ▼
+  Rust Control Plane (Linux & macOS Router)
+  ┌──────────────────────────────────────────────┐
+  │  Linux: Namespaces + seccomp + pagemap       │
+  │  macOS: Seatbelt MAC + APFS CoW clone        │
+  │  Transparent proxy for mock endpoints        │
+  └──────────────┬───────────────────────────────┘
+                 │
+                 ▼
+         StateDelta { memory, fs, network }
+```
+
+---
+
+## Features
+
+- **Direct `dex` CLI** — Run any command ephemerally without configuration files or Docker (`de` and `dry-exec` aliases supported)
+- **`@dry_exec.dry_run` decorator** — Zero boilerplate ephemeral execution for Python functions
+- **3-line agent loop** — Propose → dry-run → evaluate → self-correct → commit
+- **Native macOS support** — Kernel-level Seatbelt MAC sandboxing and APFS `clonefile` hardware CoW
+
+- **Kernel-level Linux isolation** — Linux namespaces (PID, NET, MNT, IPC, UTS) with seccomp-BPF filtering
+- **$O(P_{\text{dirty}})$ state diffing** — Soft-dirty pagemap tracking, no app-level hashing
+- **Transparent network proxy** — Schema-driven mock responses, zero external egress
+- **OpenTelemetry integration** — Structured JSON receipts and OTel span tracing
+- **Rich terminal visualization** — `DeltaLogger` renders memory/fs/network mutations
+
+---
+
+## Examples
+
+| Example | Description |
+|---|---|
+| [`quickstart.py`](examples/getting_started/quickstart.py) | 3-line setup with `@dry_exec.dry_run` |
+| [`native_agent.py`](examples/getting_started/native_agent.py) | 3-line self-correcting agent loop |
+| [`type_safe_db_migration.py`](examples/use_cases/type_safe_db_migration.py) | DB migration recovering from schema boundary rejections |
+| [`api_payment_exploration.py`](examples/use_cases/api_payment_exploration.py) | Payment API exploration with mock interception |
+| [`langchain_tool.py`](examples/integrations/langchain_tool.py) | LangChain tool wrapper |
+
+
+---
+
+## Verification
+
+### Native Local Verification (Linux & macOS)
+
+Run the local test harness directly on your machine (zero Docker required):
+
+```bash
+./scripts/test.sh
+```
+
+### Containerized Linux Verification (Cross-Platform)
+
+To test the complete Linux kernel primitive suite inside Docker:
+
+```bash
+./docker/build.sh
+docker run --rm --privileged --cap-add=SYS_ADMIN --cap-add=SYS_PTRACE dry-exec-test-harness
+```
+
+---
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and terminology conventions.
+
+## License
+
+[MIT](LICENSE)
+
+===== SECURITY.md =====
+
+# Trust Center
+
+`dry-exec` is an execution boundary for exploring proposed agent actions. It reduces blast radius; it does not make arbitrary code trustworthy or replace production change control.
+
+## Scope and assumptions
+
+- Treat action payloads and command output as untrusted.
+- Review returned `StateDelta` before committing durable changes.
+- Run Linux kernel tests with the documented privileged harness.
+- Keep secrets outside trial inputs and environment variables unless a specific test requires them.
+
+## Threat model
+
+### Prompt injection
+
+Prompt injection can cause an agent to propose an unintended command, target, or endpoint. dry-exec validates the proposed action against the configured target and endpoint schema, then reports the resulting delta. It does not determine whether the agent’s intent is legitimate. Human or application-level approval remains required for durable commit.
+
+### Secret access
+
+The boundary limits filesystem and network access, including explicit secret-path denials in the macOS profile. This is not a guarantee that every application-specific secret location is known. Do not mount secret stores into a trial unless required and reviewed.
+
+### Escape vectors
+
+Relevant escape classes include kernel vulnerabilities, namespace configuration errors, Seatbelt profile errors, unsafe native FFI, device access, and dependency compromise. The project reduces exposure with Linux namespaces, seccomp, macOS Seatbelt, isolated filesystem handling, and focused regression tests. Keep host kernels, Python, Rust, and dependencies patched.
+
+### Network leakage
+
+Registered HTTP routes return deterministic responses through the local proxy. Unregistered routes are recorded as schema breaches. HTTPS `CONNECT` is terminated with an ephemeral per-host certificate; clients must use an isolated trust policy, and the E2E client disables verification because the mock certificate is not a public trust root.
+
+## Threat & Isolation Model
+
+`dry-exec` provides an ephemeral execution primitive engineered to intercept and record state mutations produced by autonomous execution loops before changes commit to durable environments.
+
+### Core Isolation Boundaries
+1. **Namespace Isolation**:
+   - `CLONE_NEWPID`: Child processes cannot signal, trace, or observe host processes.
+   - `CLONE_NEWNET`: Default loopback-only environment; external interfaces are unconfigured, forcing network requests through the transparent proxy.
+   - `CLONE_NEWNS`: Mount table is unshared with `MS_REC | MS_PRIVATE`. Sterile `/proc` and private `tmpfs` mounts prevent host filesystem alteration.
+   - `CLONE_NEWIPC` & `CLONE_NEWUTS`: IPC queues and system hostnames are isolated.
+
+2. **Syscall Interception (`seccomp-bpf`)**:
+   - Evaluates system calls against an explicit whitelist.
+   - Disallowed system calls generate `SECCOMP_RET_TRAP` (triggering `SIGSYS`), causing the isolation boundary to intercept the violation, record the instruction pointer and syscall number, and abort execution.
+
+3. **Memory & State Mutation Tracking**:
+   - Processes execute against Copy-on-Write (CoW) memory mappings (`MAP_PRIVATE`).
+   - Mutations are captured via kernel soft-dirty bitfields and ephemeral inode deltas, ensuring host storage is never directly modified during dry-run exploration.
+
+## Reporting Vulnerabilities
+
+If you identify an escape vector, namespace leak, or memory-boundary defect:
+1. **Do not open a public GitHub issue.**
+2. Email full reproduction details, kernel version, and PoC script to `security@dry-exec.org`.
+3. Allow up to 48 hours for an initial triage and confirmation from the core maintainers.
+4. Coordinated disclosure will occur following the release of a verified patch.
+
+===== CONTRIBUTING.md =====
+
+# Contributing to `dry-exec`
+
+Thank you for your interest in contributing to `dry-exec`. We welcome contributions to our ephemeral execution primitive and deterministic state delta engine.
+
+## Architectural Mental Model
+
+`dry-exec` is a kernel-level execution layer designed for autonomous execution loops. It guarantees deterministic state-mutation tracking and ephemeral boundaries via:
+1. **Linux Namespace Isolation**: Strict separation across PID, NET, MOUNT, IPC, and UTS namespaces.
+2. **Deterministic State Deltas**: $O(P_{\text{dirty}})$ memory page-table diffing via kernel soft-dirty tracking and tmpfs inode diffs.
+3. **Transparent Proxy Interception**: Interception of external API endpoints with deterministic schema mocking.
+4. **Type-Safe Python SDK & PyO3 FFI**: Synchronous Pydantic V2 validation and non-blocking runtime execution.
+
+## Architectural Terminology
+
+To preserve engineering precision and avoid ambiguous abstractions, all code, documentation, pull requests, and commit messages must adhere to kernel and systems terminology:
+- Focus on: `deterministic`, `ephemeral`, `isolated`, `state-mutation`, `boundary`, `control flow`, `primitive`, `execution layer`, `namespace`, `syscall interception`, `state delta`, `type-safe`, `transparent proxy`, `autonomous execution loop`.
+
+## Development Setup
+
+### Prerequisites
+- **Linux Kernel**: Linux 5.x+ with support for namespaces and soft-dirty pagemap (`/proc/[pid]/pagemap`). On macOS/Windows, development requires Docker.
+- **Rust Toolchain**: 1.80+ (`cargo`, `rustfmt`, `clippy`).
+- **Python**: 3.10+ with `venv`, `pip`, and `maturin`.
+- **Docker**: For running the containerized verification harness.
+
+### Local Workflow
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/dry-exec/dry-exec.git
+   cd dry-exec
+   ```
+
+2. Run developer setup and linting:
+   ```bash
+   ./scripts/lint.sh
+   ```
+
+3. Build the core and Python extension:
+   ```bash
+   ./scripts/build.sh
+   ```
+
+4. Run the verification test suite:
+   ```bash
+   ./scripts/test.sh
+   ```
+
+## Pull Request Guidelines
+
+1. **Deterministic Verification**: Every pull request must pass the automated CI workflows (`ci.yml`, `lint.yml`).
+2. **Zero In-Memory State Leaks**: All test cases mutating memory or disk must verify complete teardown after execution.
+3. **Precision Compliance**: Avoid vague non-technical wrappers; adhere strictly to kernel isolation and type-safe invariants.
+4. **Conventional Commits**: Format commit messages cleanly (e.g., `feat: implement seccomp trap handler`, `refactor: simplify pagemap byte decoding`).
+
+===== docs/architecture/loop1-isolation-design.md =====
+
+# Loop 1 Architecture: Kernel Isolation Primitive
+
+## 1. System Overview
+
+`dry-exec` provides an ephemeral execution boundary, enabling deterministic state exploration by isolating state-mutation primitives at the kernel level.
+
+The Loop 1 objective establishes the ephemeral execution boundary in the Rust core control plane (`crates/dry-exec-core`). The primitive clones the execution layer into dedicated Linux namespaces and attaches a deterministic `seccomp-bpf` syscall interception filter before transferring control flow to the target action.
+
+```
++-------------------------------------------------------------+
+|               Rust Core Control Plane (Parent)              |
+|  - Manages ephemeral lifecycle & boundaries                 |
+|  - Spawns isolated execution layer via clone(2)             |
+|  - Awaits process termination or syscall interception signal |
++------------------------------+------------------------------+
+                               | clone(CLONE_NEWPID | CLONE_NEWNET | CLONE_NEWNS)
+                               v
++-------------------------------------------------------------+
+|             Ephemeral Execution Layer (Child)               |
+|  1. Namespace isolation configuration                       |
+|     - Private mount propagation & sterile /proc             |
+|     - Loopback-only isolated network namespace              |
+|     - In-namespace transparent proxy mock listener          |
+|  2. Seccomp-BPF syscall interception filter attachment      |
+|     - Strict whitelist of allowed syscalls                  |
+|     - Immediate SIGSYS termination on boundary breach       |
+|  3. Action invocation & state-mutation execution            |
++-------------------------------------------------------------+
+```
+
+---
+
+## 2. Module Hierarchy & Crate Layout
+
+```
+crates/dry-exec-core/
+├── Cargo.toml
+└── src/
+    ├── lib.rs                  # Crate root and high-level boundary interface
+    ├── error.rs                # Type-safe kernel boundary error definitions
+    └── isolation/
+        ├── mod.rs              # Isolation primitive entry point and lifecycle supervisor
+        ├── namespace.rs        # Linux namespace cloning and unshare primitives
+        ├── mount.rs            # Mount namespace isolation, tmpfs root, private propagation
+        ├── seccomp.rs          # Seccomp-BPF filter builder and syscall interception table
+        └── process.rs          # Process clone execution and status reporting
+```
+
+---
+
+## 3. Structural Design & Type-Safe Interfaces
+
+### 3.1 Namespace Isolation Specification (`isolation::namespace`)
+
+Namespace isolation segregates the kernel resources of the execution layer from the host environment:
+
+*   **`CLONE_NEWPID`**: Isolates process IDs. The ephemeral child becomes PID 1 inside its namespace.
+*   **`CLONE_NEWNET`**: Eliminates external socket communication. Only a localized loopback interface is instantiated.
+*   **`CLONE_NEWNS`**: Isolates mount points, preventing external filesystem state mutations.
+*   **`CLONE_NEWIPC`**: Prevents System V IPC and POSIX message queue boundary crossing.
+*   **`CLONE_NEWUTS`**: Isolates hostname and NIS domain identifiers.
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NamespaceFlags {
+    pub pid: bool,
+    pub net: bool,
+    pub mount: bool,
+    pub ipc: bool,
+    pub uts: bool,
+}
+
+impl Default for NamespaceFlags {
+    fn default() -> Self {
+        Self {
+            pid: true,
+            net: true,
+            mount: true,
+            ipc: true,
+            uts: true,
+        }
+    }
+}
+```
+
+### 3.2 Syscall Interception Filter Specification (`isolation::seccomp`)
+
+The syscall interception engine compiles a BPF (Berkeley Packet Filter) program attached via `prctl(PR_SET_NO_NEW_PRIVS, 1, ...)` and `seccomp(SECCOMP_SET_MODE_FILTER, ...)`.
+
+*   **Default Action**: `SECCOMP_RET_KILL_PROCESS` (or `SECCOMP_RET_TRAP` for verification inspection).
+*   **Permitted Actions**: `SECCOMP_RET_ALLOW` strictly mapped to an immutable whitelist of syscall numbers.
+*   **Syscall Whitelist**:
+    *   State inspection / standard I/O: `read`, `write`, `close`, `fstat`, `lseek`.
+    *   Memory management: `mmap` (read/write/private), `munmap`, `mprotect`, `brk`.
+    *   Control flow termination: `exit`, `exit_group`.
+    *   Blocked by default: `socket`, `connect`, `bind`, `execve`, `fork`, `clone`, `kill`.
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyscallAction {
+    Allow,
+    Trap,
+    KillProcess,
+    Errno(u16),
+}
+
+#[derive(Debug, Clone)]
+pub struct SyscallRule {
+    pub syscall_nr: i64,
+    pub action: SyscallAction,
+}
+
+pub struct SeccompFilter {
+    default_action: SyscallAction,
+    rules: Vec<SyscallRule>,
+}
+```
+
+### 3.3 Ephemeral Process Control Plane (`isolation::process`)
+
+The parent process initializes a synchronization channel (Unix domain socketpair or pipe with `O_CLOEXEC`), clones into the execution layer, applies the seccomp-bpf filter inside the child, executes the closure/payload, and reports the termination status back across the boundary.
+
+```rust
+#[derive(Debug)]
+pub enum BoundaryExitStatus {
+    Exited(i32),
+    Signaled(i32),
+    SyscallViolation { syscall_nr: u32, ip: u64 },
+}
+
+pub struct IsolatedProcess {
+    child_pid: nix::unistd::Pid,
+    sync_fd: std::os::unix::io::RawFd,
+}
+```
+
+### 3.4 Transparent Proxy Boundary Handshake (`delta::network`)
+
+The isolated execution layer occupies a dedicated `CLONE_NEWNET`, so a listener bound on the control plane's loopback is unreachable from within the boundary. The mock listener must therefore be bound **inside** the isolated namespace, while the requests it intercepts are recorded on the control plane.
+
+1.  The control plane reserves a loopback port (`TransparentProxy::reserve_loopback_port`) and carries the schema-driven route table in the boundary configuration.
+2.  The execution layer enables the namespace loopback interface (`SIOCSIFFLAGS`), which starts `down` and yields `ENETUNREACH` on connect until enabled.
+3.  The execution layer binds the schema listener on that port and forwards the descriptor to the control plane as `SCM_RIGHTS` control data attached to the readiness frame.
+4.  The control plane constructs `TransparentProxy::from_listener` over the forwarded descriptor and serves it: the socket stays bound inside the isolated namespace, so requests originating there reach the proxy, while accepted connections and the mutation ledger remain on the control plane.
+5.  During inspection the proxy is surfaced through `BoundaryContext::network` and adopted by `DeltaCoordinator::set_network_proxy`, so intercepted requests are aggregated into `StateDelta.network_mutations` alongside memory and filesystem mutations.
+
+---
+
+## 4. Control Flow Progression
+
+1.  **Preparation Phase**: Control plane establishes synchronization pipe and precomputes BPF bytecode instructions.
+2.  **Clone Phase**: `clone(2)` or `clone3` executes with `SIGCHLD | CLONE_NEWPID | CLONE_NEWNET | CLONE_NEWNS | CLONE_NEWIPC | CLONE_NEWUTS`.
+3.  **Child Initialization Phase**:
+    *   Set private mount propagation: `mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL)`.
+    *   Mount isolated ephemeral `/proc` and sterile tmpfs overlays.
+    *   Set `PR_SET_NO_NEW_PRIVS`.
+    *   Load BPF filter into the kernel via `seccomp(SECCOMP_SET_MODE_FILTER, 0, &fprog)`.
+    *   Signal parent readiness across the synchronization channel.
+4.  **Execution Phase**: Execute target state-mutation action within the isolated boundary.
+5.  **Interception / Termination Phase**:
+    *   If a blocked syscall is executed: Kernel intercepts the syscall and raises `SIGSYS` / kills the isolated process immediately.
+    *   If execution completes: Return state mutation exit code and close descriptors.
+6.  **Reaping & Inspection Phase**: Parent reaps child using `waitpid(__WALL)`, decodes termination signal or exit status, and confirms deterministic boundary preservation.
+
+===== docs/architecture/loop13-decision-layer-design.md =====
+
+# Loop 13 Architecture: System-One Decision Layer
+
+## 1. System Overview
+
+Loop 13 replaces chatty text-based validation of an ephemeral state mutation with a deterministic,
+calibrated routing primitive evaluated in microseconds. The decision layer sits between state delta
+generation and the Python SDK's return to the caller. It does not read program text, it does not
+invoke a language model: it evaluates the mathematical receipt of the mutation against the typed
+thresholds of the environment.
+
+```text
++-------------------------------------------------------------------------+
+|                    Python SDK / `dex` CLI / Agent loop                  |
+|   routing only: escalation halts control flow or forces an explicit      |
+|   --commit; no scoring logic is duplicated outside the execution layer   |
++---------------------------------+---------------------------------------+
+                                  | PyO3 FFI (single crossing)
+                                  v
++-------------------------------------------------------------------------+
+|                  Rust Control Plane (dry-exec-core)                     |
+|                                                                         |
+|  1. Ephemeral Execution (namespaces / Seatbelt)                         |
+|  2. State Delta Engine (pagemap soft-dirty / APFS CoW)                  |
+|         |  produces StateDelta { bytes, inodes, intercepted calls,      |
+|         |                        schema_breaches }                     |
+|         v                                                               |
+|  3. SYSTEM-ONE DECISION LAYER (decision/)                               |
+|     +-------------------------------------------------------------+     |
+|     | Input A: DeltaSummary  (Copy scalar projection, O(1))       |     |
+|     | Input B: Environment   (calibrated thresholds)              |     |
+|     |                                                             |     |
+|     | risk_score = 0.5 * bytes_ratio + 0.5 * network_ratio        |     |
+|     | choice     = Violated | Blocked | Allowed                   |     |
+|     | noul       = Escalate | AutoCommit                           |     |
+|     +-------------------------------------------------------------+     |
+|                                                                         |
+|  Output: DecisionReceipt { choice, risk_score, noul_trigger, reason }    |
++-------------------------------------------------------------------------+
+```
+
+## 2. Module Specification (`crates/dry-exec-core/src/decision/`)
+
+| File | Contents |
+| --- | --- |
+| `primitives.rs` | `Choice { Allowed, Blocked, Violated }`, `Score(f32)` clamped into `[0.0, 1.0]`, `Noul { AutoCommit, Escalate }`, `DecisionReceipt` |
+| `environment.rs` | `DeltaSummary` (the sole scorer input) and `Environment` (calibrated thresholds) |
+| `mod.rs` | `evaluate(&DeltaSummary, &Environment) -> DecisionReceipt` and the calibrated weights |
+
+### 2.1 Calibrated Risk Metric
+
+```
+bytes_ratio   = total_bytes_mutated / max_mutated_bytes
+network_ratio = network_calls       / max_network_calls
+risk_score    = Score::new(0.5 * bytes_ratio + 0.5 * network_ratio)
+```
+
+`Score::new` clamps into the calibrated range and saturates non-finite input to `1.0`, so an
+unevaluable ratio routes as maximum risk rather than as an unconstrained value. A zero ceiling is
+an exhausted budget: no mutation scores `0.0`, any mutation saturates, and the boundary never
+divides by zero.
+
+### 2.2 Routing
+
+| Condition | `Choice` | `Noul` |
+| --- | --- | --- |
+| `bytes_ratio > 1.0` or `network_ratio > 1.0` | `Violated` | `Escalate` |
+| `schema_breaches > 0` | `Blocked` | `Escalate` |
+| otherwise, `risk_score > max_risk_threshold` | `Allowed` | `Escalate` |
+| otherwise | `Allowed` | `AutoCommit` |
+
+Precedence is `Violated` > `Blocked` > `Allowed`. `reason` is one of four interpolated system
+strings; no explanation is generated.
+
+## 3. The O(1) Constraint
+
+The score is computed from `DeltaSummary`, a `Copy` projection of the state delta that holds counts
+and totals only. The mutation vectors are therefore **not in scope** inside the scored region: the
+complexity bound is a property the compiler enforces rather than a convention reviewers police.
+`DeltaSummary::from_state_delta` reads only lengths and scalar totals, which is O(1) against the
+size of the state.
+
+`Choice::Blocked` needs a categorical signal that a scalar summary can carry. A mutation target
+outside the permitted set is rejected synchronously *before* execution and never produces a state
+delta, so the observable categorical refusal is the transparent proxy refusing a route outside the
+registered schema. That count is precomputed once at delta-generation time
+(`StateDelta::schema_breaches`) where the knowledge already exists, keeping the decision layer O(1)
+without an $O(N)$ scan of `network_mutations`.
+
+## 4. FFI Seam
+
+The receipt is computed in the existing `execute_isolated_action` crossing, in the dict-assembly
+path shared by the Linux and macOS backends, and returned under `"decision"`:
+
+```
+decision = { choice, risk_score, noul_trigger, reason }
+```
+
+A second `evaluate_decision(delta, thresholds)` entry point was rejected: re-marshalling every
+mutation vector across the FFI to return four scalars is precisely the O(N) overhead this layer
+exists to remove.
+
+## 5. Python Integration Map
+
+| Module | Responsibility |
+| --- | --- |
+| `models.py` | `Choice`, `Noul`, `DecisionReceipt`, and `StateDelta.decision` |
+| `schemas.py` | calibrated `Environment` thresholds: `max_mutated_bytes`, `max_network_calls`, `max_risk_threshold` |
+| `exceptions.py` | `DecisionEscalationError` carrying the choice, calibrated score, and system reason |
+| `decision.py` | `parse_decision`, `is_escalated`, `enforce_escalation` — mapping and routing only |
+| `client.py` | passes thresholds, attaches the receipt to the state delta, emits decision telemetry |
+| `observability.py` | renders the decision receipt and the escalation panel |
+| `cli.py` | escalation clears only through an explicit `--commit`; otherwise exit code `4` |
+| `agent.py` | the autonomous execution loop halts on escalation unless `force=True` |
+
+Exit code `4` is distinct from `1` (configuration), `2` (boundary violation), and `3`
+(execution-layer error), so CI control flow can separate intentional escalation from failure. An
+interactive confirmation cannot clear escalation: only the explicit flag does.
+
+## 6. Verification
+
+- `cargo test --lib` gates the primitives, the routing table, the latency bound, and latency
+  invariance across state size.
+- `benches/decision_bench.rs` reports `evaluate` latency for a 100MB state delta alongside an
+  empty one.
+- `tests/test_decision.py` gates the receipt mapping, escalation routing, CLI/Agent gates, and
+  end-to-end routing through the real execution layer.
+- Container harness Phase 6 executes the decision suite against the kernel boundary.
+
+===== docs/architecture/loop2-delta-engine-design.md =====
+
+# Loop 2 Architecture: State Delta Engine
+
+## 1. System Overview
+
+`dry-exec` provides an ephemeral execution boundary, enabling deterministic state exploration by isolating state-mutation primitives at the kernel level.
+
+The Loop 2 objective establishes the **State Delta Engine** within the Rust core control plane (`crates/dry-exec-core/src/delta`). Following isolated execution in the Loop 1 kernel boundary, the State Delta Engine computes the exact state mutation across memory and ephemeral filesystem layers without full state duplication or $O(N)$ application-level hashing.
+
+```
++-------------------------------------------------------------------------+
+|                    Rust Core Control Plane (Parent)                     |
+|                                                                         |
+|  1. Pre-Execution Setup:                                                |
+|     - Map initial state via mmap(MAP_PRIVATE)                           |
+|     - Reset dirty page bits via /proc/[pid]/clear_refs                  |
+|     - Snapshot tmpfs inode metadata directory tree                      |
+|                                                                         |
+|  2. Ephemeral Isolation (Loop 1 Primitive):                             |
+|     - Fork/clone into isolated namespaces (PID, NET, MOUNT, IPC)        |
+|     - Attach SECCOMP_RET_TRAP syscall interception boundary             |
+|                                                                         |
+|  3. Execution Layer State Mutation (Child):                             |
+|     - Executes isolated state-mutating action                           |
+|     - Kernel CoW duplicates only written memory pages                   |
+|     - Kernel marks dirty bit in page table for modified pages           |
+|     - Mutations written to isolated tmpfs overlay                       |
+|                                                                         |
+|  4. Post-Execution State Delta Computation:                             |
+|     - Inspect /proc/[pid]/pagemap bit 55 (soft-dirty flag)              |
+|     - Compute byte deltas strictly for dirty pages: O(P_dirty)          |
+|     - Diff tmpfs inode metadata tree against pre-execution snapshot     |
+|     - Construct structured, type-safe StateDelta                        |
++-------------------------------------------------------------------------+
+```
+
+---
+
+## 2. Module Hierarchy & Crate Layout
+
+```
+crates/dry-exec-core/
+├── Cargo.toml
+└── src/
+    ├── lib.rs                  # Root crate interface
+    ├── error.rs                # Type-safe kernel boundary error definitions
+    ├── isolation/              # Loop 1: Namespace & syscall interception boundary
+    │   ├── mod.rs
+    │   ├── namespace.rs
+    │   ├── mount.rs
+    │   ├── seccomp.rs
+    │   └── process.rs
+    └── delta/                  # Loop 2: State Delta Engine
+        ├── mod.rs              # Delta engine coordinator & StateDelta definition
+        ├── memory.rs           # CoW memory mapping & page-table dirty tracking
+        ├── pagemap.rs          # /proc/[pid]/pagemap & soft-dirty bit reader
+        ├── fs.rs               # Ephemeral tmpfs inode diffing engine
+        └── types.rs            # Type-safe delta representations (ByteDelta, InodeDelta)
+```
+
+---
+
+## 3. Structural Design & Kernel Primitives
+
+### 3.1 Copy-on-Write (CoW) Memory Isolation (`delta::memory`)
+
+Memory state exploration requires zero-cost duplication of base state:
+
+*   **Mapping:** The target state is memory-mapped using `mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)` or backed by a file descriptor.
+*   **Kernel CoW Behavior:** Pre-fork, physical memory pages are shared between the control plane and the child execution layer. When the isolated child writes to an address, the kernel page-fault handler intercepts the write, allocates a new physical frame, copies the 4KB page, and updates the child's page table.
+*   **Boundary Guarantee:** The control plane's original memory mapping remains completely untouched by child mutations.
+
+### 3.2 Page-Table Dirty Tracking (`delta::pagemap`)
+
+Application-level hashing of large state regions (e.g., computing SHA-256 over a 10MB–1GB state) incurs unacceptable $O(N)$ execution latency. The State Delta Engine implements kernel-level page-table tracking using Linux soft-dirty bits (`CONFIG_MEM_SOFT_DIRTY`):
+
+1.  **Bit Clearing (Pre-Execution):** The control plane clears soft-dirty tracking by writing `"4\n"` to `/proc/self/clear_refs` (or `/proc/[pid]/clear_refs`).
+2.  **Child Execution:** As the isolated action mutates memory, the kernel hardware page table sets the dirty flag, transitioning the virtual page to soft-dirty.
+3.  **Bit Reading (Post-Execution):** The State Delta Engine reads `/proc/[pid]/pagemap`. Each 4KB virtual page has a corresponding 64-bit descriptor:
+    *   **Bit 55:** `PAGE_SOFT_DIRTY` flag (1 if written since `clear_refs`, 0 otherwise).
+    *   **Bit 63:** `PAGE_PRESENT` flag.
+4.  **$O(P_{\text{dirty}})$ Delta Scan:**
+    *   For a 10MB memory mapping ($2,560$ pages of 4KB), `/proc/[pid]/pagemap` consumes exactly $20,480$ bytes. Reading and scanning $2,560$ 64-bit words takes under $10\,\mu\text{s}$.
+    *   Only pages with Bit 55 set are read and compared against the baseline mapping.
+    *   Zero false positives: clean pages are skipped entirely.
+
+### 3.3 Ephemeral Filesystem Inode Diffing (`delta::fs`)
+
+Filesystem mutations are confined to an isolated `tmpfs` mount created in the mount namespace:
+
+1.  **Pre-Execution Inode Snapshot:** Traverse the directory tree of the ephemeral mount point, storing a table of `InodeRecord` entries:
+    ```rust
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct InodeRecord {
+        pub ino: u64,
+        pub path: std::path::PathBuf,
+        pub size: u64,
+        pub mode: u32,
+        pub mtime_nsec: i64,
+        pub ctime_nsec: i64,
+    }
+    ```
+2.  **Post-Execution Traversal & Classification:**
+    *   **Added Inodes:** Inodes or paths present post-execution but absent pre-execution.
+    *   **Deleted Inodes:** Paths present pre-execution but unlinked during execution.
+    *   **Mutated Inodes:** Matching paths where `size`, `mtime`, or content altered.
+3.  **Content Delta Extraction:** For mutated files, compute exact byte offsets of file modifications within the `tmpfs` overlay.
+
+---
+
+## 4. Type-Safe Rust Interfaces
+
+```rust
+use std::path::PathBuf;
+
+/// Exact byte mutation within a memory page or file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ByteDelta {
+    pub offset: usize,
+    pub original: Vec<u8>,
+    pub mutated: Vec<u8>,
+}
+
+/// State mutation detected on a single virtual memory page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageMutation {
+    pub page_index: usize,
+    pub page_address: usize,
+    pub deltas: Vec<ByteDelta>,
+}
+
+/// Filesystem mutation records for the ephemeral tmpfs boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FsMutation {
+    Created { path: PathBuf, mode: u32, size: u64 },
+    Modified { path: PathBuf, deltas: Vec<ByteDelta> },
+    Deleted { path: PathBuf },
+}
+
+/// Complete deterministic state delta returned to the control flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateDelta {
+    pub memory_mutations: Vec<PageMutation>,
+    pub fs_mutations: Vec<FsMutation>,
+    pub total_bytes_mutated: usize,
+    pub duration_nanos: u64,
+}
+
+pub trait StateDeltaEngine {
+    /// Initialize CoW tracking on the designated memory region.
+    fn prepare_memory_region(&mut self, addr: *mut u8, len: usize) -> Result<(), crate::error::DeltaError>;
+
+    /// Snapshot baseline filesystem state on ephemeral tmpfs root.
+    fn snapshot_fs(&mut self, root: &std::path::Path) -> Result<(), crate::error::DeltaError>;
+
+    /// Compute exact state mutation delta post-execution.
+    fn compute_delta(&self, pid: nix::unistd::Pid) -> Result<StateDelta, crate::error::DeltaError>;
+}
+```
+
+---
+
+## 5. Verification Parameters & Performance Assertions
+
+1.  **State Delta Precision (Zero False Positives):**
+    *   Initialize a 10MB memory-mapped buffer.
+    *   Execute an isolated state-mutating action writing exactly 4 bytes (`0xDEADBEEF`) at offset `0x004A_0000` (page 1184) and creating `/ephemeral/mutated.bin`.
+    *   The engine must return `memory_mutations.len() == 1`, with exact offset `0x004A_0000`, `mutated == [0xDE, 0xAD, 0xBE, 0xEF]`, and `fs_mutations.len() == 1`.
+2.  **Bounded Computational Complexity ($O(1)$ relative to total state size):**
+    *   Diff computation time must depend strictly on the number of mutated pages ($P_{\text{dirty}}$), not the total buffer size $N$.
+    *   Comparing a 4-byte mutation in a 10MB region versus a 100MB region must yield equivalent diffing latency within kernel pagemap scan tolerances.
+3.  **Non-Linux Target Enforcement:**
+    *   `crates/dry-exec-core` will enforce compile-time gating:
+        ```rust
+        #[cfg(not(target_os = "linux"))]
+        compile_error!("dry-exec requires Linux kernel primitives (namespaces, seccomp-bpf, soft-dirty pagemap). Build and execute tests inside the provided Linux container verification harness.");
+        ```
+
+===== docs/patterns/preventing-api-leakage.md =====
+
+# Preventing API leakage during agent runs
+
+Register only deterministic endpoints needed by a trial. The isolated command receives proxy settings; unregistered routes become schema breaches.
+
+```python
+from dry_exec import Action, DryExecClient, Environment, MockResponse
+
+env = Environment(
+    name="payments-trial",
+    allowed_mutation_targets={"payment-preview"},
+    allowed_api_endpoints={
+        "GET https://api.example.test/quote": MockResponse(
+            body='{"amount": 1250, "currency": "USD"}'
+        )
+    },
+)
+action = Action(
+    action_id="quote-001",
+    target_resource="payment-preview",
+    mutation_type="execute",
+    payload={"command": ["python3", "tools/fetch_quote.py"]},
+)
+
+delta = await DryExecClient().execute_ephemeral_action(env, action)
+assert delta.schema_breaches == 0
+for request in delta.network_mutations:
+    print(request.method, request.url, request.response_status)
+```
+
+HTTP and HTTPS mock routing are supported. HTTPS uses an ephemeral per-host certificate; production clients should inject and trust a trial CA instead of disabling verification.
+
+===== docs/patterns/safe-db-migrations.md =====
+
+# Safe database migrations
+
+Use `dry-exec` to exercise migration logic against an ephemeral boundary before applying it to a durable database.
+
+```python
+from dry_exec import Action, DryExecClient, Environment
+
+env = Environment(
+    name="migration-review",
+    allowed_mutation_targets={"schema"},
+    allowed_filesystem_roots=["/tmp/dry_exec_ephemeral"],
+)
+action = Action(
+    action_id="add-index-v1",
+    target_resource="schema",
+    mutation_type="execute",
+    payload={"command": ["python3", "migrations/add_index.py"]},
+)
+
+delta = await DryExecClient().execute_ephemeral_action(env, action)
+if delta.exit_code != 0:
+    raise RuntimeError(delta.stderr.decode())
+for mutation in delta.fs_mutations:
+    print(mutation.mutation_type, mutation.path)
+```
+
+Review `exit_code`, filesystem mutations, and network mutations before applying the same migration to a durable target. dry-exec does not replace database backups, transaction strategy, or migration review.

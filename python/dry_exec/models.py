@@ -123,6 +123,9 @@ class StateDelta(BaseModel):
     duration_nanos: int = Field(
         description="State delta computation latency in nanoseconds"
     )
+    stdout: bytes = Field(default=b"", description="Captured isolated stdout")
+    stderr: bytes = Field(default=b"", description="Captured isolated stderr")
+    exit_code: int = Field(default=0, description="Isolated action exit status")
     decision: Optional[DecisionReceipt] = Field(
         default=None,
         description="System-One decision receipt routed from the execution layer",

@@ -4,6 +4,9 @@ import asyncio
 import concurrent.futures
 import functools
 import inspect
+import os
+import textwrap
+import tempfile
 import uuid
 from typing import Callable, Optional, Set, Union
 
@@ -51,6 +54,27 @@ def _exec_coro_safely(coro):
     return asyncio.run(coro)
 
 
+def _callable_command(fn: Callable, args, kwargs):
+    """Create a short-lived Python worker script for isolated execution."""
+    source = textwrap.dedent(inspect.getsource(fn))
+    source = "\n".join(
+        line for line in source.splitlines() if not line.lstrip().startswith("@")
+    )
+    script = (
+        f"{source}\n\n"
+        f"{fn.__name__}(*{args!r}, **{kwargs!r})\n"
+    )
+    handle = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".py", prefix="dry_exec_callable_", delete=False
+    )
+    try:
+        handle.write(script)
+        path = handle.name
+    finally:
+        handle.close()
+    return ["python", path], path
+
+
 def dry_run(
     func: Optional[Callable] = None,
     *,
@@ -79,6 +103,7 @@ def dry_run(
 
             @functools.wraps(fn)
             async def async_wrapper(*args, **kwargs) -> StateDelta:
+                command, script_path = _callable_command(fn, args, kwargs)
                 action = Action(
                     action_id=f"act_{target_name}_{uuid.uuid4().hex[:6]}",
                     target_resource=target_name,
@@ -86,20 +111,27 @@ def dry_run(
                     payload={
                         "args": [str(a) for a in args],
                         "kwargs": {k: str(v) for k, v in kwargs.items()},
+                        "command": command,
                     },
                 )
-                delta = await exec_client.execute_ephemeral_action(target_env, action)
-                # System-One escalation gate: escalation clears only through an explicit commit
-                enforce_escalation(delta.decision, force=commit)
-                if commit:
-                    await fn(*args, **kwargs)
-                return delta
+                try:
+                    delta = await exec_client.execute_ephemeral_action(target_env, action)
+                    enforce_escalation(delta.decision, force=commit)
+                    if commit:
+                        await fn(*args, **kwargs)
+                    return delta
+                finally:
+                    try:
+                        os.unlink(script_path)
+                    except FileNotFoundError:
+                        pass
 
             return async_wrapper
         else:
 
             @functools.wraps(fn)
             def sync_wrapper(*args, **kwargs) -> StateDelta:
+                command, script_path = _callable_command(fn, args, kwargs)
                 action = Action(
                     action_id=f"act_{target_name}_{uuid.uuid4().hex[:6]}",
                     target_resource=target_name,
@@ -107,16 +139,22 @@ def dry_run(
                     payload={
                         "args": [str(a) for a in args],
                         "kwargs": {k: str(v) for k, v in kwargs.items()},
+                        "command": command,
                     },
                 )
-                delta = _exec_coro_safely(
-                    exec_client.execute_ephemeral_action(target_env, action)
-                )
-                # System-One escalation gate: escalation clears only through an explicit commit
-                enforce_escalation(delta.decision, force=commit)
-                if commit:
-                    fn(*args, **kwargs)
-                return delta
+                try:
+                    delta = _exec_coro_safely(
+                        exec_client.execute_ephemeral_action(target_env, action)
+                    )
+                    enforce_escalation(delta.decision, force=commit)
+                    if commit:
+                        fn(*args, **kwargs)
+                    return delta
+                finally:
+                    try:
+                        os.unlink(script_path)
+                    except FileNotFoundError:
+                        pass
 
             return sync_wrapper
 
