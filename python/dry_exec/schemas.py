@@ -48,7 +48,7 @@ class Environment(BaseModel):
     )
     allowed_mutation_targets: Set[str] = Field(
         default_factory=lambda: {"*"},
-        description="Immutable whitelist of state fields or entities permitted for mutation",
+        description="Immutable allowlist of state fields or entities permitted for mutation",
     )
     allowed_filesystem_roots: List[str] = Field(
         default_factory=lambda: ["/tmp/dry_exec_ephemeral"],

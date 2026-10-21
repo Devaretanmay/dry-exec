@@ -69,13 +69,7 @@ extern "C" fn sigsys_handler(
                 )
             };
             frame[1..].copy_from_slice(packet_bytes);
-            let _ = unsafe {
-                libc::write(
-                    fd,
-                    frame.as_ptr() as *const libc::c_void,
-                    frame.len(),
-                )
-            };
+            let _ = unsafe { libc::write(fd, frame.as_ptr() as *const libc::c_void, frame.len()) };
         }
         unsafe {
             libc::_exit(128 + libc::SIGSYS);

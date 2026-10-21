@@ -28,7 +28,7 @@ A clear and concise description of what state delta or execution boundary behavi
 
 **Traceback / Diagnostic Logs**
 ```text
-Paste logs from dry-exec inspect or DeltaLogger receipts here.
+Paste tracebacks, SchemaViolationError details, or StateDelta receipts here.
 ```
 
 **Additional Context**

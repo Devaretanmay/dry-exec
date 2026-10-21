@@ -136,7 +136,9 @@ pub fn generate_seatbelt_profile(config: &SeatbeltConfig) -> String {
         sbpl.push_str(&format!("(deny file-read* (subpath \"{home}/.gnupg\"))\n"));
         sbpl.push_str(&format!("(deny file-read* (subpath \"{home}/.docker\"))\n"));
         sbpl.push_str(&format!("(deny file-read* (subpath \"{home}/.kube\"))\n"));
-        sbpl.push_str(&format!("(deny file-read* (subpath \"{home}/.config/gcloud\"))\n"));
+        sbpl.push_str(&format!(
+            "(deny file-read* (subpath \"{home}/.config/gcloud\"))\n"
+        ));
         sbpl.push_str(&format!("(deny file-read* (literal \"{home}/.netrc\"))\n"));
     }
 

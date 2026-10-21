@@ -26,8 +26,8 @@ class DryExecLangChainTool:
 
     name: str = "dry_exec_sandbox"
     description: str = (
-        "Execute an action ephemerally within an isolated Linux namespace and return "
-        "a deterministic StateDelta recording memory, filesystem, and network mutations."
+        "Execute an action ephemerally within an isolated kernel boundary (Linux namespaces or macOS Seatbelt) "
+        "and return a deterministic StateDelta recording memory, filesystem, and network mutations."
     )
     args_schema: Type[BaseModel] = DryExecToolInput
 

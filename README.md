@@ -2,14 +2,15 @@
 
 # dry-exec
 
-**Deterministic ephemeral execution primitive for autonomous loops.**
+**Deterministic ephemeral execution primitive for autonomous AI loops.**
 
 Explore state mutations without consequences. Commit only what you approve.
 
+[![PyPI](https://img.shields.io/pypi/v/dry-exec.svg)](https://pypi.org/project/dry-exec/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
-[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-green.svg)](#architecture)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-green.svg)](#architecture-dual-backend-engine)
 [![CI](https://github.com/Devaretanmay/dry-exec/actions/workflows/ci.yml/badge.svg)](https://github.com/Devaretanmay/dry-exec/actions/workflows/ci.yml)
 
 </div>
@@ -18,44 +19,50 @@ Explore state mutations without consequences. Commit only what you approve.
 
 ## What is dry-exec?
 
-One AI agent is a cool demo. Running 100 in production is a state-management problem:
+One AI agent is a cool demo. Running 100 autonomous agents in production is a state-management nightmare:
 
-- commands can write files before review;
-- migration code can touch the wrong database;
-- API calls can leak real credentials or spend real money;
-- rollback becomes someone’s pager.
+- Commands modify host files before anyone reviews them.
+- Migration scripts touch the wrong database table or lock schemas.
+- External API calls leak real credentials, spam webhooks, or trigger real billing.
+- Cleaning up failed agent attempts turns into an emergency pager rotation.
 
-`dry-exec` gives each proposed action an ephemeral trial. The action runs behind native Linux or macOS boundaries. The SDK returns a structured `StateDelta` containing observed memory, filesystem, network, stdout, stderr, and exit-code changes. You review that receipt before committing anything durable.
+`dry-exec` gives every proposed action an ephemeral trial run. The action executes behind native OS boundaries (Linux namespaces or macOS Seatbelt + APFS copy-on-write). The SDK captures every mutation and returns a structured `StateDelta` receipt containing modified filesystem inodes, network calls, stdout, stderr, and exit codes.
 
-The useful mental model: `git diff` for a runtime action.
+The mental model: **`git diff` for runtime execution.**
 
 ### What it covers
 
-| Production risk | Trial result |
+| Production risk | Ephemeral trial outcome |
 |---|---|
-| Unreviewed filesystem writes | Isolated filesystem mutation list |
-| Failed command hidden behind a wrapper | Captured stdout, stderr, and exit code |
-| Real API call during exploration | Schema-driven HTTP mock proxy |
-| Host changes during a dry run | Linux namespaces or macOS Seatbelt/APFS boundaries |
-| Agent decision made from raw logs | Typed `StateDelta` and decision receipt |
-
-Linux real-command execution and HTTP/HTTPS mock interception are verified in the container harness. macOS `/bin/echo` real-command execution is covered by native E2E.
+| Unreviewed filesystem writes | Isolated filesystem mutation list (inode diffing) |
+| Failed commands hidden behind wrappers | Captured stdout, stderr, and real exit code |
+| Live API calls during exploration | Schema-driven loopback mock proxy with zero outbound egress |
+| Host mutations during dry-runs | Linux namespaces or macOS Seatbelt/APFS CoW boundaries |
+| Autonomous decisions from raw text | Typed `StateDelta` receipt and $O(1)$ decision routing |
 
 ---
 
 ## Installation
 
+Install directly from PyPI:
+
 ```bash
 pip install dry-exec
+```
+
+Or lock to a specific release:
+
+```bash
+pip install dry-exec==0.1.0
 ```
 
 ---
 
 ## Quickstart
 
-### Path 1: The 3-Line Autonomous Agent Loop
+### 1. The 3-line autonomous agent loop
 
-Let an autonomous execution loop propose actions, test them ephemerally, evaluate state deltas, and self-correct:
+Let an autonomous agent propose actions, dry-run them ephemerally, evaluate state deltas, and self-correct if a boundary is violated:
 
 ```python
 import asyncio
@@ -72,9 +79,9 @@ asyncio.run(main())
 
 <br>
 
-### Path 2: Direct Ephemeral Client Execution
+### 2. Direct ephemeral client execution
 
-Run an isolated trial and inspect the exact `StateDelta` receipt before approving mutations:
+Run an isolated trial, inspect the exact `StateDelta` receipt, and review decisions before approving state mutations:
 
 ```python
 import asyncio
@@ -99,23 +106,23 @@ asyncio.run(main())
 
 <br>
 
-### Path 3: The `@dry_exec.dry_run` Decorator
+### 3. The `@dry_exec.dry_run` decorator
 
-Wrap any function to run inside an ephemeral kernel sandbox. Returns the computed `StateDelta`:
+Wrap any Python function to run inside an ephemeral kernel sandbox. Returns the computed `StateDelta`:
 
 ```python
 import dry_exec
 
 @dry_exec.dry_run
 def update_balance(account_id: str, amount: int):
-    # Runs in ephemeral sandbox; database is untouched
+    # Runs in ephemeral sandbox; database and host files are untouched
     db.execute("UPDATE accounts SET balance = balance + $1 WHERE id = $2", amount, account_id)
 
 delta = update_balance("acc_101", 500)
 print(f"{delta.total_bytes_mutated} bytes mutated in {delta.duration_nanos}ns")
 ```
 
-Or execute directly with functional `dry_exec.run()`:
+Or execute arbitrary commands directly via functional `dry_exec.run()`:
 
 ```python
 delta = dry_exec.run("python seed_data.py")
@@ -123,29 +130,29 @@ delta = dry_exec.run("python seed_data.py")
 
 ---
 
-## Architecture: Dual-Backend Engine
+## Architecture: dual-backend engine
 
 `dry-exec` features a **native dual-backend architecture**. It automatically detects the host operating system and compiles to native kernel primitives with sub-millisecond execution latencies:
 
 ```
-                            dry-exec Architecture
-                                      │
-            ┌─────────────────────────┴─────────────────────────┐
-            ▼                                                   ▼
-      Linux Backend                                       macOS Backend
-   (Production & Cloud)                                (Local Development)
-─────────────────────────                           ─────────────────────────
-• Linux Namespaces (PID, NET, MNT)                  • Apple Seatbelt (sandbox_init)
-• seccomp-BPF TRAP filter                           • APFS Copy-on-Write (clonefile)
-• /proc/[pid]/pagemap soft-dirty                    • Transparent Loopback Proxy
-• Zero Docker needed                                • Zero Docker needed
+                            dry-exec architecture
+                                       │
+            ┌──────────────────────────┴──────────────────────────┐
+            ▼                                                     ▼
+      Linux Backend                                         macOS Backend
+   (Production & Cloud)                                  (Local Development)
+─────────────────────────                             ─────────────────────────
+• Linux Namespaces (PID, NET, MNT)                    • Apple Seatbelt (sandbox_init)
+• seccomp-BPF TRAP filter                             • APFS Copy-on-Write (clonefile)
+• /proc/[pid]/pagemap soft-dirty                      • Transparent Loopback Proxy
+• Zero Docker needed                                  • Zero Docker needed
 ```
 
 ```
   Autonomous Execution Loop (Python SDK)
   ┌──────────────────────────────────────────────┐
   │  @dry_exec.dry_run or Agent(task=...).run()  │
-  │  Async FFI dispatch (GIL released)           │
+  │  Async FFI dispatch (Python GIL released)    │
   └──────────────┬───────────────────────────────┘
                  │ PyO3 FFI
                  ▼
@@ -165,13 +172,13 @@ delta = dry_exec.run("python seed_data.py")
 
 ## Features
 
-- **3-line agent loop** — Propose → dry-run → evaluate → self-correct → commit
-- **`@dry_exec.dry_run` decorator** — Zero boilerplate ephemeral execution for Python functions
-- **Kernel-level Linux isolation** — Linux namespaces (PID, NET, MNT, IPC, UTS) with seccomp-BPF filtering
-- **Native macOS support** — Kernel-level Seatbelt MAC sandboxing and APFS `clonefile` hardware CoW
-- **$O(P_{\text{dirty}})$ state diffing** — Soft-dirty pagemap tracking, no app-level hashing
-- **Transparent network proxy** — Schema-driven mock responses, zero external egress
-- **Deterministic System-One Decision Engine** — $O(1)$ scalar projection routing safe actions to Auto-Commit in nanoseconds
+- **3-line agent loop**: Propose → dry-run → evaluate → self-correct → commit.
+- **`@dry_exec.dry_run` decorator**: Zero-boilerplate ephemeral execution for Python functions.
+- **Kernel-level Linux isolation**: Linux namespaces (PID, NET, MNT, IPC, UTS) with seccomp-BPF filtering.
+- **Native macOS support**: Kernel-level Seatbelt MAC sandboxing and APFS `clonefile` hardware CoW.
+- **$O(P_{\text{dirty}})$ state diffing**: Soft-dirty pagemap tracking with no application-level hashing overhead.
+- **Transparent network proxy**: Schema-driven mock responses with zero external egress.
+- **Deterministic System-One decision engine**: $O(1)$ scalar projection routing safe actions to Auto-Commit in nanoseconds.
 
 ### Optional local System-One scorer
 
@@ -180,12 +187,18 @@ Rust `laya-rs` runtime. The feature loads a checkpoint from a caller-provided lo
 it never downloads weights implicitly. Deterministic boundary decisions remain first: blocked or
 violated actions do not invoke Laya, while allowed actions may blend deterministic risk (40%) with
 the local model score (60%). If checkpoint loading fails, callers can retain deterministic-only
-routing. This feature is disabled by default because Laya checkpoints are large and latency must
-be measured on the target hardware rather than assumed from upstream benchmarks.
+routing.
 
 ```bash
 cargo check -p dry-exec-core --features laya
 ```
+
+---
+
+## Production patterns
+
+- [Safe database migrations](docs/patterns/safe-db-migrations.md): Test schema migrations against an ephemeral boundary before applying changes to durable storage.
+- [Preventing API leakage](docs/patterns/preventing-api-leakage.md): Intercept external API calls with deterministic mock responses and detect unapproved outbound requests.
 
 ---
 
@@ -195,16 +208,15 @@ cargo check -p dry-exec-core --features laya
 |---|---|
 | [`quickstart.py`](examples/getting_started/quickstart.py) | 3-line setup with `@dry_exec.dry_run` |
 | [`native_agent.py`](examples/getting_started/native_agent.py) | 3-line self-correcting agent loop |
-| [`type_safe_db_migration.py`](examples/type_safe_db_migration.py) | DB migration recovering from schema boundary rejections |
+| [`type_safe_db_migration.py`](examples/type_safe_db_migration.py) | Database migration recovering from schema boundary rejections |
 | [`api_payment_exploration.py`](examples/api_payment_exploration.py) | Payment API exploration with mock interception |
 | [`langchain_tool.py`](examples/integrations/langchain_tool.py) | LangChain tool wrapper |
-
 
 ---
 
 ## Verification
 
-### Native Local Verification (Linux & macOS)
+### Native local verification (Linux and macOS)
 
 Run the local test harness directly on your machine (zero Docker required):
 
@@ -212,7 +224,7 @@ Run the local test harness directly on your machine (zero Docker required):
 ./scripts/test.sh
 ```
 
-### Containerized Linux Verification (Cross-Platform)
+### Containerized Linux verification (cross-platform)
 
 To test the complete Linux kernel primitive suite inside Docker:
 
@@ -225,7 +237,7 @@ docker run --rm --privileged --cap-add=SYS_ADMIN --cap-add=SYS_PTRACE dry-exec-t
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and terminology conventions.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, architectural terminology, and guidelines.
 
 ## License
 

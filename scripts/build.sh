@@ -5,7 +5,6 @@ echo "==> Building Rust workspace..."
 if [ "$(uname)" = "Darwin" ]; then
     echo "==> Detected macOS host: building native Darwin target..."
     RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup" cargo build --workspace
-    cargo check --workspace --target x86_64-unknown-linux-gnu
 else
     cargo build --workspace
 fi

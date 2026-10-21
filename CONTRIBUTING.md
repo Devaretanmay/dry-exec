@@ -1,32 +1,36 @@
-# Contributing to `dry-exec`
+# Contributing to dry-exec
 
-Thank you for your interest in contributing to `dry-exec`. We welcome contributions to our ephemeral execution primitive and deterministic state delta engine.
+Thanks for your interest in contributing to `dry-exec`! We love contributions that make our ephemeral execution primitive and deterministic state delta engine faster, safer, and simpler to run.
 
-## Architectural Mental Model
+## Architectural mental model
 
-`dry-exec` is a kernel-level execution layer designed for autonomous execution loops. It guarantees deterministic state-mutation tracking and ephemeral boundaries via:
-1. **Linux Namespace Isolation**: Strict separation across PID, NET, MOUNT, IPC, and UTS namespaces.
-2. **Deterministic State Deltas**: $O(P_{\text{dirty}})$ memory page-table diffing via kernel soft-dirty tracking and tmpfs inode diffs.
-3. **Transparent Proxy Interception**: Interception of external API endpoints with deterministic schema mocking.
-4. **Type-Safe Python SDK & PyO3 FFI**: Synchronous Pydantic V2 validation and non-blocking runtime execution.
+`dry-exec` is a kernel-level execution layer designed for autonomous AI agents. It gives each proposed action an isolated trial and returns a structured `StateDelta` receipt before anything is committed to a durable environment:
+1. **Linux namespace isolation**: Strict separation across PID, NET, MOUNT, IPC, and UTS namespaces.
+2. **macOS Seatbelt sandboxing**: Kernel-level mandatory access control (MAC) combined with APFS copy-on-write `clonefile` snapshots.
+3. **Deterministic state deltas**: $O(P_{\text{dirty}})$ memory page-table diffing via kernel soft-dirty tracking and tmpfs inode diffs.
+4. **Transparent proxy interception**: Ephemeral loopback proxy that serves deterministic mock responses for registered routes and records schema breaches for unregistered routes.
+5. **Type-safe Python SDK and PyO3 FFI**: Synchronous Pydantic V2 validation, release of the Python GIL during kernel isolation, and non-blocking runtime execution.
 
-## Architectural Terminology
+## Architectural terminology
 
-To preserve engineering precision and avoid ambiguous abstractions, all code, documentation, pull requests, and commit messages must adhere to kernel and systems terminology:
-- Focus on: `deterministic`, `ephemeral`, `isolated`, `state-mutation`, `boundary`, `control flow`, `primitive`, `execution layer`, `namespace`, `syscall interception`, `state delta`, `type-safe`, `transparent proxy`, `autonomous execution loop`.
+To keep engineering precision high and avoid ambiguous abstractions, all code, documentation, pull requests, and commit messages should stick to systems and kernel terminology:
+- Recommended terms: `deterministic`, `ephemeral`, `isolated`, `state-mutation`, `boundary`, `control flow`, `primitive`, `execution layer`, `namespace`, `syscall interception`, `state delta`, `type-safe`, `transparent proxy`, and `autonomous execution loop`.
 
-## Development Setup
+## Development setup
 
 ### Prerequisites
-- **Linux Kernel**: Linux 5.x+ with support for namespaces and soft-dirty pagemap (`/proc/[pid]/pagemap`). On macOS/Windows, development requires Docker.
-- **Rust Toolchain**: 1.80+ (`cargo`, `rustfmt`, `clippy`).
+- **Operating system**:
+  - **macOS**: 11.0+ with Apple Silicon or Intel (runs natively with Seatbelt and APFS).
+  - **Linux**: Kernel 5.x+ with support for namespaces and soft-dirty pagemap (`/proc/[pid]/pagemap`).
+- **Rust toolchain**: 1.80+ (`cargo`, `rustfmt`, and `clippy`).
 - **Python**: 3.10+ with `venv`, `pip`, and `maturin`.
-- **Docker**: For running the containerized verification harness.
+- **Docker** (optional): For running the Linux containerized verification matrix across platforms.
 
-### Local Workflow
+### Local workflow
+
 1. Clone the repository:
    ```bash
-   git clone https://github.com/dry-exec/dry-exec.git
+   git clone https://github.com/Devaretanmay/dry-exec.git
    cd dry-exec
    ```
 
@@ -45,9 +49,15 @@ To preserve engineering precision and avoid ambiguous abstractions, all code, do
    ./scripts/test.sh
    ```
 
-## Pull Request Guidelines
+5. (Optional) Run the complete Linux container verification suite:
+   ```bash
+   ./docker/build.sh
+   docker run --rm --privileged --cap-add=SYS_ADMIN --cap-add=SYS_PTRACE dry-exec-test-harness
+   ```
 
-1. **Deterministic Verification**: Every pull request must pass the automated CI workflows (`ci.yml`, `lint.yml`).
-2. **Zero In-Memory State Leaks**: All test cases mutating memory or disk must verify complete teardown after execution.
-3. **Precision Compliance**: Avoid vague non-technical wrappers; adhere strictly to kernel isolation and type-safe invariants.
-4. **Conventional Commits**: Format commit messages cleanly (e.g., `feat: implement seccomp trap handler`, `refactor: simplify pagemap byte decoding`).
+## Pull request guidelines
+
+1. **Deterministic verification**: Every pull request must pass the automated CI workflows (`ci.yml`, `lint.yml`).
+2. **Zero in-memory state leaks**: All test cases mutating memory or disk must verify complete teardown after execution.
+3. **Precision compliance**: Avoid vague non-technical abstractions; adhere strictly to kernel isolation and type-safe invariants.
+4. **Conventional commits**: Format commit messages cleanly (e.g., `feat: implement seccomp trap handler`, `refactor: simplify pagemap byte decoding`).

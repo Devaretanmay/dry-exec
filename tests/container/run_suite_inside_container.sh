@@ -17,9 +17,9 @@ echo "================================================================="
 pytest -v tests/test_sdk.py
 
 echo "================================================================="
-echo " Phase 4: Running CLI & Observability Tests (Loops 5 & 6)..."
+echo " Phase 4: Running Real Linux Kernel Execution Tests..."
 echo "================================================================="
-pytest -v tests/test_cli.py
+pytest -v tests/test_real_execution.py
 
 echo "================================================================="
 echo " Phase 5: Running Production-Ready Examples (Loop 7)..."

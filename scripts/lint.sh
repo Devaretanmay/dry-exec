@@ -4,8 +4,12 @@ set -euo pipefail
 echo "==> Running Rust formatting check..."
 cargo fmt --all -- --check || echo "[WARN] cargo fmt failed or rustfmt not installed"
 
-echo "==> Running Cargo check on Linux target..."
-cargo check --workspace --tests --target x86_64-unknown-linux-gnu
+echo "==> Running Cargo check..."
+if [ "$(uname)" = "Darwin" ]; then
+    cargo check --workspace --tests
+else
+    cargo check --workspace --tests --target x86_64-unknown-linux-gnu
+fi
 
 echo "==> Auditing codebase for prohibited terms..."
 PATTERN=$(printf '%s|%s|%s|%s|%s|%s|%s' "pol""icy" "guard""ian" "guard""rails" "shie""ld" "anti""virus" "sl""op" "safety""-first")

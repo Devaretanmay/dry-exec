@@ -47,6 +47,9 @@ async def run_self_correcting_db_migration():
 
     # 4. Step 3: Execute inside ephemeral kernel isolation
     delta: StateDelta = await client.execute_ephemeral_action(env, corrected_action)
+    print(
+        f"Trial completed: decision={delta.decision.choice}, bytes={delta.total_bytes_mutated}"
+    )
 
     print("\n[SUCCESS] Self-correcting state exploration workflow verified.")
 

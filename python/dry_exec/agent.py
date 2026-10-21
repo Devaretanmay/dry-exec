@@ -96,7 +96,7 @@ class Agent:
         """Executes the autonomous loop: propose -> dry-run -> evaluate receipt -> self-correct / commit.
 
         A receipt routed to escalation halts the loop and raises DecisionEscalationError unless
-        force=True, which is the programmatic equivalent of the CLI's explicit --commit.
+        force=True, which is the programmatic operator override.
         """
         active_task = task or self.task
         if not active_task:

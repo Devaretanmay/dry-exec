@@ -35,7 +35,13 @@ async def test_macos_real_command_separates_stdout_and_stderr():
         action_id="macos_stdio_002",
         target_resource="shell_command",
         mutation_type="execute",
-        payload={"command": ["/bin/sh", "-c", "printf 'std_out_data\n'; printf 'std_err_data\n' >&2"]},
+        payload={
+            "command": [
+                "/bin/sh",
+                "-c",
+                "printf 'std_out_data\n'; printf 'std_err_data\n' >&2",
+            ]
+        },
     )
     delta = await DryExecClient().execute_ephemeral_action(
         Environment(name="macos-stdio-separation", allowed_mutation_targets={"*"}),
@@ -85,4 +91,8 @@ async def test_macos_credential_paths_are_denied():
     # If ~/.ssh exists, reading is denied by Seatbelt (Operation not permitted)
     if os.path.exists(f"{home}/.ssh"):
         assert delta.exit_code != 0 or b"Operation not permitted" in delta.stdout
-        assert b"Operation not permitted" in delta.stdout or b"denied" in delta.stdout or delta.exit_code != 0
+        assert (
+            b"Operation not permitted" in delta.stdout
+            or b"denied" in delta.stdout
+            or delta.exit_code != 0
+        )

@@ -4,8 +4,6 @@ Covers the Python-side mapping and escalation routing, the CLI and autonomous ex
 gates, and end-to-end routing produced by the Rust decision layer across the FFI boundary.
 """
 
-import json
-from pathlib import Path
 import re
 import sys
 

@@ -47,7 +47,7 @@ deterministic decision path; neural output never overrides a deterministic refus
    - `CLONE_NEWIPC` & `CLONE_NEWUTS`: IPC queues and system hostnames are isolated.
 
 2. **Syscall Interception (`seccomp-bpf`)**:
-   - Evaluates system calls against an explicit whitelist.
+   - Evaluates system calls against an explicit allowlist.
    - Disallowed system calls generate `SECCOMP_RET_TRAP` (triggering `SIGSYS`), causing the isolation boundary to intercept the violation, record the instruction pointer and syscall number, and abort execution.
 
 3. **Memory & State Mutation Tracking**:
