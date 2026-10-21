@@ -140,11 +140,13 @@ fn scan_ephemeral_dir(
                 // Check if file modified
                 let baseline_meta = fs::metadata(&baseline_path)?;
                 if baseline_meta.len() != size || files_differ(&path, &baseline_path)? {
+                    const MAX_DIFF_CAPTURE_BYTES: u64 = 8 * 1024 * 1024;
                     let mut orig_bytes = Vec::new();
                     let mut mut_bytes = Vec::new();
-                    let _ =
-                        File::open(&baseline_path).and_then(|mut f| f.read_to_end(&mut orig_bytes));
-                    let _ = File::open(&path).and_then(|mut f| f.read_to_end(&mut mut_bytes));
+                    let _ = File::open(&baseline_path)
+                        .and_then(|f| f.take(MAX_DIFF_CAPTURE_BYTES).read_to_end(&mut orig_bytes));
+                    let _ = File::open(&path)
+                        .and_then(|f| f.take(MAX_DIFF_CAPTURE_BYTES).read_to_end(&mut mut_bytes));
 
                     let deltas = vec![ByteDelta {
                         offset: 0,

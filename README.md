@@ -53,48 +53,53 @@ pip install dry-exec
 
 ## Quickstart
 
-### Path 1: The `dex` CLI (Direct Command Execution)
+### Path 1: The 3-Line Autonomous Agent Loop
 
-Run any command directly in an ephemeral sandbox without YAML or Docker (`de` and `dry-exec` also supported as aliases):
+Let an autonomous execution loop propose actions, test them ephemerally, evaluate state deltas, and self-correct:
 
-```bash
-# Dry-run: inspect the state delta without modifying host
-dex "python migrate.py"
+```python
+import asyncio
+from dry_exec import Agent
 
-# Commit changes only if the dry-run delta looks right
-dex --commit "npm run seed"
+async def main():
+    agent = Agent(task="Clean up old temp files and migrate user records")
+    result = await agent.run()
 
-# Inspect active environment limits and boundary rules
-dex inspect --config env.yaml
-```
+    print(f"Success: {result.success}, Trials: {result.trials_conducted}, Committed: {result.committed}")
 
-```
-$ dex "python dangerous_script.py"
-
-╭──────────────── Ephemeral State Exploration: Proposed Action ────────────────╮
-│ Environment     cli_ephemeral_sandbox                                        │
-│ Action ID       cmd_7f2b1a                                                   │
-│ Target Resource shell_command                                                │
-│ Mutation Type   execute                                                      │
-│ Payload         {'command': 'python dangerous_script.py'}                    │
-╰──────────────────── Pre-Execution Boundary Verification ─────────────────────╯
-╭─────────────────────── State Delta Receipt (Trial #1) ───────────────────────╮
-│ Metric                           Count / Value                               │
-│ ──────────────────────────────────────────────────────────────────────────── │
-│ Memory Pages Mutated             N/A (macOS bare-metal; Linux pagemap only)  │
-│ Filesystem Changes               3 inodes (APFS CoW snapshot)                │
-│ Network Requests Intercepted     1 request intercepted (Stripe mock proxy)   │
-│ Total Mutated Bytes              4,096 bytes                                 │
-│ Computation Latency              0.320 ms (sub-millisecond native kernel)    │
-╰──────────────────────────────────────────────────────────────────────────────╯
-
-Commit state delta to target environment? [y/N]: n
-[Real host and live APIs remain untouched.]
+asyncio.run(main())
 ```
 
 <br>
 
-### Path 2: The `@dry_exec.dry_run` Decorator
+### Path 2: Direct Ephemeral Client Execution
+
+Run an isolated trial and inspect the exact `StateDelta` receipt before approving mutations:
+
+```python
+import asyncio
+from dry_exec import Action, DryExecClient, Environment
+
+async def main():
+    client = DryExecClient()
+    env = Environment(name="sandbox", allowed_mutation_targets={"*"})
+    action = Action(
+        action_id="act_001",
+        target_resource="shell_command",
+        mutation_type="execute",
+        payload={"command": ["/bin/sh", "-c", "echo hello > test.txt"]},
+    )
+
+    delta = await client.execute_ephemeral_action(env, action)
+    print(f"Decision: {delta.decision.choice}, Risk: {delta.decision.risk_score}")
+    print(f"Filesystem mutations: {delta.fs_mutations}")
+
+asyncio.run(main())
+```
+
+<br>
+
+### Path 3: The `@dry_exec.dry_run` Decorator
 
 Wrap any function to run inside an ephemeral kernel sandbox. Returns the computed `StateDelta`:
 
@@ -114,26 +119,6 @@ Or execute directly with functional `dry_exec.run()`:
 
 ```python
 delta = dry_exec.run("python seed_data.py")
-```
-
-
-<br>
-
-### Path 3: The 3-Line Autonomous Agent Loop
-
-Let an autonomous execution loop propose actions, test them ephemerally, evaluate state deltas, and self-correct:
-
-```python
-import asyncio
-from dry_exec import Agent
-
-async def main():
-    agent = Agent(task="Clean up old temp files and migrate user records")
-    result = await agent.run()
-
-    print(f"Success: {result.success}, Trials: {result.trials_conducted}, Committed: {result.committed}")
-
-asyncio.run(main())
 ```
 
 ---
@@ -161,35 +146,32 @@ asyncio.run(main())
   ┌──────────────────────────────────────────────┐
   │  @dry_exec.dry_run or Agent(task=...).run()  │
   │  Async FFI dispatch (GIL released)           │
-  │  Structured telemetry + OTel spans           │
   └──────────────┬───────────────────────────────┘
-                 │ PyO3 FFI / `dex` CLI
+                 │ PyO3 FFI
                  ▼
   Rust Control Plane (Linux & macOS Router)
   ┌──────────────────────────────────────────────┐
   │  Linux: Namespaces + seccomp + pagemap       │
   │  macOS: Seatbelt MAC + APFS CoW clone        │
   │  Transparent proxy for mock endpoints        │
+  │  System-One Decision Layer (O(1) in delta)   │
   └──────────────┬───────────────────────────────┘
                  │
                  ▼
-         StateDelta { memory, fs, network }
+         StateDelta { memory, fs, network, decision }
 ```
 
 ---
 
 ## Features
 
-- **Direct `dex` CLI** — Run any command ephemerally without configuration files or Docker (`de` and `dry-exec` aliases supported)
-- **`@dry_exec.dry_run` decorator** — Zero boilerplate ephemeral execution for Python functions
 - **3-line agent loop** — Propose → dry-run → evaluate → self-correct → commit
-- **Native macOS support** — Kernel-level Seatbelt MAC sandboxing and APFS `clonefile` hardware CoW
-
+- **`@dry_exec.dry_run` decorator** — Zero boilerplate ephemeral execution for Python functions
 - **Kernel-level Linux isolation** — Linux namespaces (PID, NET, MNT, IPC, UTS) with seccomp-BPF filtering
+- **Native macOS support** — Kernel-level Seatbelt MAC sandboxing and APFS `clonefile` hardware CoW
 - **$O(P_{\text{dirty}})$ state diffing** — Soft-dirty pagemap tracking, no app-level hashing
 - **Transparent network proxy** — Schema-driven mock responses, zero external egress
-- **OpenTelemetry integration** — Structured JSON receipts and OTel span tracing
-- **Rich terminal visualization** — `DeltaLogger` renders memory/fs/network mutations
+- **Deterministic System-One Decision Engine** — $O(1)$ scalar projection routing safe actions to Auto-Commit in nanoseconds
 
 ### Optional local System-One scorer
 
@@ -213,8 +195,8 @@ cargo check -p dry-exec-core --features laya
 |---|---|
 | [`quickstart.py`](examples/getting_started/quickstart.py) | 3-line setup with `@dry_exec.dry_run` |
 | [`native_agent.py`](examples/getting_started/native_agent.py) | 3-line self-correcting agent loop |
-| [`type_safe_db_migration.py`](examples/use_cases/type_safe_db_migration.py) | DB migration recovering from schema boundary rejections |
-| [`api_payment_exploration.py`](examples/use_cases/api_payment_exploration.py) | Payment API exploration with mock interception |
+| [`type_safe_db_migration.py`](examples/type_safe_db_migration.py) | DB migration recovering from schema boundary rejections |
+| [`api_payment_exploration.py`](examples/api_payment_exploration.py) | Payment API exploration with mock interception |
 | [`langchain_tool.py`](examples/integrations/langchain_tool.py) | LangChain tool wrapper |
 
 

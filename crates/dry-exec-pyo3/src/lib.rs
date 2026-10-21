@@ -13,38 +13,65 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::net::TcpStream;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Schema-driven mock endpoint: (method, path, status_code, headers, body).
 type MockEndpoint = (String, String, u16, HashMap<String, String>, Vec<u8>);
 
-fn capture_file(label: &str) -> Result<(PathBuf, File), String> {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| format!("capture clock error: {e}"))?
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("dry_exec_{label}_{nonce}"));
-    let file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(true)
-        .open(&path)
-        .map_err(|e| format!("capture file error: {e}"))?;
-    Ok((path, file))
+static CAPTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// RAII capture file preventing symlink attacks (O_CREAT | O_EXCL with 0o600) and disk leakage on panic/error.
+struct TempCaptureFile {
+    path: PathBuf,
+    file: Option<File>,
 }
 
-fn read_capture(path: &PathBuf, mut file: File) -> Result<Vec<u8>, String> {
-    file.seek(SeekFrom::Start(0))
-        .map_err(|e| format!("capture seek error: {e}"))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|e| format!("capture read error: {e}"))?;
-    let _ = std::fs::remove_file(path);
-    Ok(bytes)
+impl TempCaptureFile {
+    fn new(label: &str) -> Result<Self, String> {
+        let pid = std::process::id();
+        let seq = CAPTURE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| format!("capture clock error: {e}"))?
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("dry_exec_{label}_{pid}_{seq}_{nonce}"));
+        let mut opts = OpenOptions::new();
+        opts.create_new(true).read(true).write(true).mode(0o600);
+        let file = opts
+            .open(&path)
+            .map_err(|e| format!("capture file error: {e}"))?;
+        Ok(Self {
+            path,
+            file: Some(file),
+        })
+    }
+
+    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+        self.file.as_ref().map(|f| f.as_raw_fd()).unwrap_or(-1)
+    }
+
+    fn read_and_unlink(&mut self) -> Result<Vec<u8>, String> {
+        let mut bytes = Vec::new();
+        if let Some(mut file) = self.file.take() {
+            file.seek(SeekFrom::Start(0))
+                .map_err(|e| format!("capture seek error: {e}"))?;
+            file.read_to_end(&mut bytes)
+                .map_err(|e| format!("capture read error: {e}"))?;
+        }
+        let _ = std::fs::remove_file(&self.path);
+        Ok(bytes)
+    }
+}
+
+impl Drop for TempCaptureFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 create_exception!(_dry_exec_ffi, IsolationSetupError, PyException);
@@ -86,12 +113,12 @@ fn execute_isolated_action(
             SeccompFilter, SyscallAction,
         };
 
-        let (stdout_path, stdout_file) = capture_file("stdout")?;
-        let (stderr_path, stderr_file) = capture_file("stderr")?;
-        let (status_path, status_file) = capture_file("status")?;
-        let stdout_fd = stdout_file.as_raw_fd();
-        let stderr_fd = stderr_file.as_raw_fd();
-        let status_fd = status_file.as_raw_fd();
+        let mut stdout_capture = TempCaptureFile::new("stdout")?;
+        let mut stderr_capture = TempCaptureFile::new("stderr")?;
+        let mut status_capture = TempCaptureFile::new("status")?;
+        let stdout_fd = stdout_capture.as_raw_fd();
+        let stderr_fd = stderr_capture.as_raw_fd();
+        let status_fd = status_capture.as_raw_fd();
         let command_for_child = command.clone();
 
         let mem_region = if memory_size > 0 {
@@ -210,12 +237,12 @@ fn execute_isolated_action(
                             ),
                         };
                         unsafe {
-                            let mut out = File::from_raw_fd(stdout_fd);
-                            let mut err = File::from_raw_fd(stderr_fd);
-                            let mut status_file = File::from_raw_fd(status_fd);
+                            let mut out = std::mem::ManuallyDrop::new(File::from_raw_fd(stdout_fd));
+                            let mut err = std::mem::ManuallyDrop::new(File::from_raw_fd(stderr_fd));
+                            let mut status_file = std::mem::ManuallyDrop::new(File::from_raw_fd(status_fd));
                             let _ = out.write_all(&stdout);
                             let _ = err.write_all(&stderr);
-                            let _ = write!(status_file, "{exit_code}");
+                            let _ = write!(&mut *status_file, "{exit_code}");
                             let _ = out.flush();
                             let _ = err.flush();
                         }
@@ -282,9 +309,9 @@ fn execute_isolated_action(
                     .ok_or_else(|| "Boundary inspection did not execute".to_string())?
                     .map_err(|e| format!("Delta computation error: {e}"))?;
 
-                delta.stdout = read_capture(&stdout_path, stdout_file)?;
-                delta.stderr = read_capture(&stderr_path, stderr_file)?;
-                let status_bytes = read_capture(&status_path, status_file)?;
+                delta.stdout = stdout_capture.read_and_unlink()?;
+                delta.stderr = stderr_capture.read_and_unlink()?;
+                let status_bytes = status_capture.read_and_unlink()?;
                 delta.exit_code = String::from_utf8_lossy(&status_bytes)
                     .trim()
                     .parse()
@@ -301,10 +328,10 @@ fn execute_isolated_action(
             execute_macos_command, execute_macos_isolated_process, SeatbeltConfig,
         };
 
-        let (stdout_path, stdout_file) = capture_file("stdout")?;
-        let (stderr_path, stderr_file) = capture_file("stderr")?;
-        let stdout_fd = stdout_file.as_raw_fd();
-        let stderr_fd = stderr_file.as_raw_fd();
+        let mut stdout_capture = TempCaptureFile::new("stdout")?;
+        let mut stderr_capture = TempCaptureFile::new("stderr")?;
+        let stdout_fd = stdout_capture.as_raw_fd();
+        let stderr_fd = stderr_capture.as_raw_fd();
         let command_for_child = command.clone();
 
         let mut coordinator = DeltaCoordinator::new();
@@ -341,17 +368,8 @@ fn execute_isolated_action(
         };
 
         let seatbelt_config = SeatbeltConfig {
-            allowed_read_paths: vec![
-                std::path::PathBuf::from("/dev"),
-                std::path::PathBuf::from("/etc"),
-                std::path::PathBuf::from("/private/etc"),
-                std::path::PathBuf::from("/private/tmp"),
-                std::path::PathBuf::from("/private/var"),
-                std::path::PathBuf::from("/var"),
-            ],
             allowed_write_paths: vec![scratch_dir.clone()],
-            allow_loopback_network: true,
-            allow_process_exec: true,
+            ..SeatbeltConfig::default()
         };
 
         let proxy_url = proxy_port.map(|port| format!("http://127.0.0.1:{port}"));
@@ -362,7 +380,7 @@ fn execute_isolated_action(
                 argv,
                 proxy_url.as_deref(),
             )
-            .map(|(code, output)| (code, Some(output)))
+            .map(|(code, stdout, stderr)| (code, Some((stdout, stderr))))
         } else {
             execute_macos_isolated_process(&scratch_dir, &seatbelt_config, || {
             if trigger_blocked_syscall {
@@ -405,12 +423,14 @@ fn execute_isolated_action(
                             127,
                         ),
                     };
-                    let mut out = unsafe { File::from_raw_fd(stdout_fd) };
-                    let mut err = unsafe { File::from_raw_fd(stderr_fd) };
-                    let _ = out.write_all(&stdout);
-                    let _ = err.write_all(&stderr);
-                    let _ = out.flush();
-                    let _ = err.flush();
+                    unsafe {
+                        let mut out = std::mem::ManuallyDrop::new(File::from_raw_fd(stdout_fd));
+                        let mut err = std::mem::ManuallyDrop::new(File::from_raw_fd(stderr_fd));
+                        let _ = out.write_all(&stdout);
+                        let _ = err.write_all(&stderr);
+                        let _ = out.flush();
+                        let _ = err.flush();
+                    }
                     return exit_code;
                 }
             }
@@ -451,10 +471,11 @@ fn execute_isolated_action(
             .map_err(|e| format!("Delta computation error: {e}"))?;
 
         if command.is_some() {
-            delta.stdout = macos_output.unwrap_or_default();
-            delta.stderr = Vec::new();
-            let _ = read_capture(&stdout_path, stdout_file);
-            let _ = read_capture(&stderr_path, stderr_file);
+            let (stdout, stderr) = macos_output.unwrap_or_default();
+            delta.stdout = stdout;
+            delta.stderr = stderr;
+            let _ = stdout_capture.read_and_unlink();
+            let _ = stderr_capture.read_and_unlink();
             delta.exit_code = status_code;
         }
 

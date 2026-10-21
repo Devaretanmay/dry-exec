@@ -8,9 +8,6 @@ from dry_exec import (
     SchemaViolationError,
     StateDelta,
 )
-from dry_exec.observability import DeltaLogger
-
-logger = DeltaLogger()
 
 
 async def run_self_correcting_db_migration():
@@ -33,13 +30,10 @@ async def run_self_correcting_db_migration():
         payload={"query": "UPDATE users SET role = 'admin' WHERE id = 42;"},
     )
 
-    logger.render_action_header(env, faulty_action)
-
     try:
         await client.execute_ephemeral_action(env, faulty_action)
-    except SchemaViolationError as exc:
-        # Pre-execution boundary rejected the action synchronously
-        logger.render_violation(exc)
+    except SchemaViolationError:
+        pass
 
     # 3. Step 2: Autonomous execution loop adapts control flow based on boundary telemetry
     corrected_action = Action(
@@ -51,14 +45,8 @@ async def run_self_correcting_db_migration():
         },
     )
 
-    logger.render_action_header(env, corrected_action)
-
     # 4. Step 3: Execute inside ephemeral kernel isolation
     delta: StateDelta = await client.execute_ephemeral_action(env, corrected_action)
-
-    # 5. Step 4: Render verifiable receipt of exact state mutation
-    logger.render_delta(delta, trial_id=2)
-    logger.render_commit_prompt(confirmed=True)
 
     print("\n[SUCCESS] Self-correcting state exploration workflow verified.")
 

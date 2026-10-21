@@ -65,7 +65,7 @@ pub fn execute_macos_command(
     seatbelt_config: &SeatbeltConfig,
     command: &[String],
     proxy_url: Option<&str>,
-) -> Result<(i32, Vec<u8>), IsolationError> {
+) -> Result<(i32, Vec<u8>, Vec<u8>), IsolationError> {
     if command.is_empty() {
         return Err(IsolationError::ProcessFailure(
             "empty command vector".to_string(),
@@ -84,30 +84,45 @@ pub fn execute_macos_command(
     argv_ptrs.push(std::ptr::null());
 
     unsafe {
-        let mut pipe_fds = [0; 2];
-        if libc::pipe(pipe_fds.as_mut_ptr()) != 0 {
+        let mut stdout_pipe_fds = [0; 2];
+        if libc::pipe(stdout_pipe_fds.as_mut_ptr()) != 0 {
             return Err(IsolationError::ProcessFailure(format!(
-                "pipe() failed: errno {}",
+                "pipe() failed for stdout: errno {}",
                 std::io::Error::last_os_error()
             )));
         }
+
+        let mut stderr_pipe_fds = [0; 2];
+        if libc::pipe(stderr_pipe_fds.as_mut_ptr()) != 0 {
+            libc::close(stdout_pipe_fds[0]);
+            libc::close(stdout_pipe_fds[1]);
+            return Err(IsolationError::ProcessFailure(format!(
+                "pipe() failed for stderr: errno {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
         let pid = libc::fork();
         if pid < 0 {
-            libc::close(pipe_fds[0]);
-            libc::close(pipe_fds[1]);
+            libc::close(stdout_pipe_fds[0]);
+            libc::close(stdout_pipe_fds[1]);
+            libc::close(stderr_pipe_fds[0]);
+            libc::close(stderr_pipe_fds[1]);
             return Err(IsolationError::ProcessFailure(format!(
                 "fork() failed: errno {}",
                 std::io::Error::last_os_error()
             )));
         }
         if pid == 0 {
-            libc::close(pipe_fds[0]);
-            if libc::dup2(pipe_fds[1], libc::STDOUT_FILENO) < 0
-                || libc::dup2(pipe_fds[1], libc::STDERR_FILENO) < 0
+            libc::close(stdout_pipe_fds[0]);
+            libc::close(stderr_pipe_fds[0]);
+            if libc::dup2(stdout_pipe_fds[1], libc::STDOUT_FILENO) < 0
+                || libc::dup2(stderr_pipe_fds[1], libc::STDERR_FILENO) < 0
             {
                 libc::_exit(126);
             }
-            libc::close(pipe_fds[1]);
+            libc::close(stdout_pipe_fds[1]);
+            libc::close(stderr_pipe_fds[1]);
             if let Err(error) = apply_seatbelt_profile(&profile) {
                 eprintln!("sandbox_init failed: {error}");
                 libc::_exit(126);
@@ -146,10 +161,17 @@ pub fn execute_macos_command(
             libc::_exit(127);
         }
 
-        libc::close(pipe_fds[1]);
-        let reader = std::thread::spawn(move || {
+        libc::close(stdout_pipe_fds[1]);
+        libc::close(stderr_pipe_fds[1]);
+        let stdout_reader = std::thread::spawn(move || {
             let mut output = Vec::new();
-            let mut pipe = std::fs::File::from_raw_fd(pipe_fds[0]);
+            let mut pipe = std::fs::File::from_raw_fd(stdout_pipe_fds[0]);
+            let _ = std::io::Read::read_to_end(&mut pipe, &mut output);
+            output
+        });
+        let stderr_reader = std::thread::spawn(move || {
+            let mut output = Vec::new();
+            let mut pipe = std::fs::File::from_raw_fd(stderr_pipe_fds[0]);
             let _ = std::io::Read::read_to_end(&mut pipe, &mut output);
             output
         });
@@ -160,7 +182,8 @@ pub fn execute_macos_command(
                 std::io::Error::last_os_error()
             )));
         }
-        let output = reader.join().unwrap_or_default();
+        let stdout = stdout_reader.join().unwrap_or_default();
+        let stderr = stderr_reader.join().unwrap_or_default();
         let exit_code = if libc::WIFEXITED(status) {
             libc::WEXITSTATUS(status)
         } else if libc::WIFSIGNALED(status) {
@@ -168,6 +191,6 @@ pub fn execute_macos_command(
         } else {
             1
         };
-        Ok((exit_code, output))
+        Ok((exit_code, stdout, stderr))
     }
 }

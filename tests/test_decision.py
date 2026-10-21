@@ -18,8 +18,8 @@ from dry_exec.models import Choice, DecisionReceipt, Noul, StateDelta
 from dry_exec.schemas import Action, Environment, MockResponse
 
 REQUIRES_KERNEL_BOUNDARY = pytest.mark.skipif(
-    sys.platform != "linux",
-    reason="Requires the Linux kernel execution boundary and Rust FFI primitive",
+    sys.platform not in ("linux", "darwin"),
+    reason="Requires the Linux or macOS kernel execution boundary and Rust FFI primitive",
 )
 
 
@@ -132,117 +132,6 @@ def test_environment_exposes_calibrated_thresholds():
 
     with pytest.raises(ValidationError):
         Environment(name="invalid_env", max_mutated_bytes=0)
-
-
-def _cli_boundary_files(tmp_path: Path) -> tuple:
-    """Environment and action configuration files for CLI invocation."""
-    env_file = tmp_path / "env.json"
-    env_file.write_text(
-        json.dumps(
-            {
-                "name": "decision_cli_env",
-                "allowed_mutation_targets": ["balance"],
-                "memory_limit_bytes": 1024 * 1024,
-            }
-        ),
-        encoding="utf-8",
-    )
-    action_file = tmp_path / "action.json"
-    action_file.write_text(
-        json.dumps(
-            {
-                "action_id": "cli_act_escalate",
-                "target_resource": "balance",
-                "mutation_type": "credit",
-                "payload": {"amount": 100},
-            }
-        ),
-        encoding="utf-8",
-    )
-    return env_file, action_file
-
-
-def _patch_cli_client(monkeypatch, delta: StateDelta) -> None:
-    """Route CLI execution through a deterministic state delta."""
-    import dry_exec.cli
-
-    async def mock_exec(*args, **kwargs):
-        return delta
-
-    monkeypatch.setattr(
-        dry_exec.cli.DryExecClient, "execute_ephemeral_action", mock_exec
-    )
-
-
-def test_cli_blocks_commit_on_escalation(tmp_path, monkeypatch):
-    """Verify escalation halts the CLI with exit code 4 and requires an explicit flag."""
-    pytest.importorskip("typer")
-    from typer.testing import CliRunner
-    from dry_exec.cli import app
-
-    env_file, action_file = _cli_boundary_files(tmp_path)
-    _patch_cli_client(monkeypatch, _escalated_delta())
-
-    result = CliRunner().invoke(
-        app,
-        ["run", "--config", str(env_file), "--action", str(action_file)],
-    )
-
-    assert result.exit_code == 4
-    assert "System-One Decision: Escalation Required" in result.stdout
-    assert "Escalation required. Re-run with --commit to force." in _plain(
-        result.stdout
-    )
-
-
-def test_cli_forced_commit_clears_escalation(tmp_path, monkeypatch):
-    """Verify an explicit --commit forces past escalation."""
-    pytest.importorskip("typer")
-    from typer.testing import CliRunner
-    from dry_exec.cli import app
-
-    env_file, action_file = _cli_boundary_files(tmp_path)
-    _patch_cli_client(monkeypatch, _escalated_delta())
-
-    result = CliRunner().invoke(
-        app,
-        [
-            "run",
-            "--config",
-            str(env_file),
-            "--action",
-            str(action_file),
-            "--commit",
-        ],
-    )
-
-    assert result.exit_code == 0
-
-
-def test_cli_auto_commits_calibrated_delta(tmp_path, monkeypatch):
-    """Verify a receipt routed to auto-commit needs no escalation flag."""
-    pytest.importorskip("typer")
-    from typer.testing import CliRunner
-    from dry_exec.cli import app
-
-    env_file, action_file = _cli_boundary_files(tmp_path)
-    calibrated = StateDelta(
-        total_bytes_mutated=4,
-        duration_nanos=11_000,
-        decision=_receipt(),
-    )
-    _patch_cli_client(monkeypatch, calibrated)
-
-    # Declining the interactive commit checkpoint leaves host state untouched with exit code 0.
-    result = CliRunner().invoke(
-        app,
-        ["run", "--config", str(env_file), "--action", str(action_file)],
-        input="n\n",
-    )
-
-    assert result.exit_code == 0
-    assert "System-One Decision Receipt" in _plain(result.stdout)
-    assert "Auto-commit" in _plain(result.stdout)
 
 
 @pytest.mark.asyncio

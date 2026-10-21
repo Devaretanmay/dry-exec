@@ -12,7 +12,6 @@ from dry_exec.exceptions import (
     SyscallBoundaryError,
 )
 from dry_exec.models import StateDelta
-from dry_exec.observability import DeltaLogger
 from dry_exec.schemas import Action, Environment
 
 
@@ -52,7 +51,7 @@ class Agent:
         llm_caller: Optional[Any] = None,
         environment: Optional[Environment] = None,
         client: Optional[DryExecClient] = None,
-        logger: Optional[DeltaLogger] = None,
+        logger: Optional[Any] = None,
         max_retries: int = 3,
     ):
         self.task = task
@@ -62,7 +61,7 @@ class Agent:
             memory_limit_bytes=64 * 1024 * 1024,
         )
         self.client = client or DryExecClient()
-        self.logger = logger or DeltaLogger()
+        self.logger = logger
         self.max_retries = max_retries
         self.llm = llm or llm_caller or self._resolve_default_llm()
 
@@ -140,14 +139,16 @@ class Agent:
                 )
                 continue
 
-            self.logger.render_action_header(self.environment, action)
+            if self.logger is not None:
+                self.logger.render_action_header(self.environment, action)
 
             try:
                 delta: StateDelta = await self.client.execute_ephemeral_action(
                     self.environment, action
                 )
-                self.logger.render_delta(delta, trial_id=trial)
-                self.logger.render_decision(delta.decision)
+                if self.logger is not None:
+                    self.logger.render_delta(delta, trial_id=trial)
+                    self.logger.render_decision(delta.decision)
 
                 # System-One routing: escalation halts the loop unless the commit is forced
                 if is_escalated(delta.decision) and not force:
@@ -159,7 +160,8 @@ class Agent:
                     )
 
                 if auto_commit:
-                    self.logger.render_commit_prompt(confirmed=True)
+                    if self.logger is not None:
+                        self.logger.render_commit_prompt(confirmed=True)
                     return AgentExecutionResult(
                         task=active_task,
                         success=True,
@@ -181,7 +183,8 @@ class Agent:
             except SchemaViolationError as sve:
                 err_msg = f"Schema boundary violation: {sve.violation_type} on target '{sve.invalid_target}'"
                 error_history.append(err_msg)
-                self.logger.render_error(sve, trial_id=trial)
+                if self.logger is not None:
+                    self.logger.render_error(sve, trial_id=trial)
                 conversation_history.append(
                     {"role": "assistant", "content": action.model_dump_json()}
                 )
@@ -195,7 +198,8 @@ class Agent:
             except SyscallBoundaryError as sbe:
                 err_msg = f"Syscall boundary violation: syscall_nr {sbe.syscall_nr} at 0x{sbe.instruction_pointer:x}"
                 error_history.append(err_msg)
-                self.logger.render_error(sbe, trial_id=trial)
+                if self.logger is not None:
+                    self.logger.render_error(sbe, trial_id=trial)
                 conversation_history.append(
                     {"role": "assistant", "content": action.model_dump_json()}
                 )
@@ -214,7 +218,8 @@ class Agent:
             except DryExecError as dee:
                 err_msg = f"Boundary error: {dee}"
                 error_history.append(err_msg)
-                self.logger.render_error(dee, trial_id=trial)
+                if self.logger is not None:
+                    self.logger.render_error(dee, trial_id=trial)
                 conversation_history.append(
                     {"role": "assistant", "content": action.model_dump_json()}
                 )

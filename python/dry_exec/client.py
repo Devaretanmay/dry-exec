@@ -16,7 +16,6 @@ from dry_exec.models import (
     StateDelta,
 )
 from dry_exec.schemas import Action, Environment
-from dry_exec.telemetry import TelemetryExporter
 
 try:
     from dry_exec import _dry_exec_ffi  # type: ignore
@@ -77,10 +76,8 @@ class DryExecClient:
     def __init__(
         self,
         ffi_module: Any = None,
-        telemetry_exporter: Optional[TelemetryExporter] = None,
     ):
         self._ffi = ffi_module if ffi_module is not None else _dry_exec_ffi
-        self.telemetry = telemetry_exporter or TelemetryExporter()
 
     async def execute_ephemeral_action(
         self,
@@ -90,44 +87,12 @@ class DryExecClient:
         request_to_trigger: Optional[Tuple[str, str, str]] = None,
     ) -> StateDelta:
         """Runs action within ephemeral boundary and returns computed StateDelta."""
-
-        with self.telemetry.trace_ephemeral_action(environment, action) as span:
-            delta = await self._execute_internal(
-                environment,
-                action,
-                trigger_blocked_syscall=trigger_blocked_syscall,
-                request_to_trigger=request_to_trigger,
-            )
-            if span is not None:
-                span.set_attribute(
-                    "dry_exec.delta.total_bytes_mutated", delta.total_bytes_mutated
-                )
-                span.set_attribute(
-                    "dry_exec.delta.duration_nanos", delta.duration_nanos
-                )
-                span.set_attribute(
-                    "dry_exec.delta.memory_pages", len(delta.memory_mutations)
-                )
-                span.set_attribute(
-                    "dry_exec.delta.fs_mutations", len(delta.fs_mutations)
-                )
-                span.set_attribute(
-                    "dry_exec.delta.network_requests", len(delta.network_mutations)
-                )
-                span.set_attribute(
-                    "dry_exec.delta.schema_breaches", delta.schema_breaches
-                )
-                if delta.decision is not None:
-                    span.set_attribute(
-                        "dry_exec.decision.choice", delta.decision.choice.value
-                    )
-                    span.set_attribute(
-                        "dry_exec.decision.noul", delta.decision.noul_trigger.value
-                    )
-                    span.set_attribute(
-                        "dry_exec.decision.risk_score", delta.decision.risk_score
-                    )
-            return delta
+        return await self._execute_internal(
+            environment,
+            action,
+            trigger_blocked_syscall=trigger_blocked_syscall,
+            request_to_trigger=request_to_trigger,
+        )
 
     async def _execute_internal(
         self,
@@ -142,7 +107,7 @@ class DryExecClient:
         if self._ffi is None:
             raise IsolationSetupError(
                 "Rust FFI primitive _dry_exec_ffi is not loaded. "
-                "Ensure execution occurs within the Linux container verification harness."
+                "Ensure native extension is built ('maturin build' or 'pip install .')."
             )
 
         # 2. Package schema-driven mock endpoints for transparent network proxy

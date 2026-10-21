@@ -18,6 +18,7 @@ extern "C" {
 pub struct SeatbeltConfig {
     pub allowed_read_paths: Vec<PathBuf>,
     pub allowed_write_paths: Vec<PathBuf>,
+    pub allowed_exec_paths: Vec<PathBuf>,
     pub allow_loopback_network: bool,
     pub allow_process_exec: bool,
 }
@@ -38,6 +39,12 @@ impl Default for SeatbeltConfig {
                 PathBuf::from("/var"),
             ],
             allowed_write_paths: vec![PathBuf::from("/private/tmp/dex_ephemeral")],
+            allowed_exec_paths: vec![
+                PathBuf::from("/bin"),
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/usr/local/bin"),
+                PathBuf::from("/opt/homebrew/bin"),
+            ],
             allow_loopback_network: true,
             allow_process_exec: true,
         }
@@ -56,6 +63,12 @@ pub fn generate_seatbelt_profile(config: &SeatbeltConfig) -> String {
         sbpl.push_str("(allow process-exec (literal \"/bin/echo\"))\n");
         sbpl.push_str("(allow process-exec (literal \"/bin/sh\"))\n");
         sbpl.push_str("(allow process-exec (literal \"/usr/bin/python3\"))\n");
+        for path in &config.allowed_exec_paths {
+            sbpl.push_str(&format!(
+                "(allow process-exec (subpath \"{}\"))\n",
+                path.display()
+            ));
+        }
         sbpl.push_str("(allow process-fork)\n");
         sbpl.push_str("(allow sysctl-read)\n\n");
         sbpl.push_str("(allow signal (target self))\n");
@@ -75,6 +88,12 @@ pub fn generate_seatbelt_profile(config: &SeatbeltConfig) -> String {
     // Read paths
     sbpl.push_str(";; Allowed read paths\n");
     for path in &config.allowed_read_paths {
+        sbpl.push_str(&format!(
+            "(allow file-read* (subpath \"{}\"))\n",
+            path.display()
+        ));
+    }
+    for path in &config.allowed_exec_paths {
         sbpl.push_str(&format!(
             "(allow file-read* (subpath \"{}\"))\n",
             path.display()
@@ -115,6 +134,10 @@ pub fn generate_seatbelt_profile(config: &SeatbeltConfig) -> String {
         sbpl.push_str(&format!("(deny file-read* (subpath \"{home}/.ssh\"))\n"));
         sbpl.push_str(&format!("(deny file-read* (subpath \"{home}/.aws\"))\n"));
         sbpl.push_str(&format!("(deny file-read* (subpath \"{home}/.gnupg\"))\n"));
+        sbpl.push_str(&format!("(deny file-read* (subpath \"{home}/.docker\"))\n"));
+        sbpl.push_str(&format!("(deny file-read* (subpath \"{home}/.kube\"))\n"));
+        sbpl.push_str(&format!("(deny file-read* (subpath \"{home}/.config/gcloud\"))\n"));
+        sbpl.push_str(&format!("(deny file-read* (literal \"{home}/.netrc\"))\n"));
     }
 
     sbpl

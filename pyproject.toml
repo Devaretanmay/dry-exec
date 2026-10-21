@@ -6,28 +6,18 @@ build-backend = "maturin"
 name = "dry-exec"
 version = "0.1.0"
 description = "Deterministic ephemeral execution primitive and state delta engine"
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.0",
-    "typer>=0.12.0",
-    "rich>=13.0.0",
-    "pyyaml>=6.0",
-    "opentelemetry-api>=1.20.0",
-    "httpx>=0.27.0",
-    "openai>=1.30.0",
 ]
-
 
 [project.optional-dependencies]
 test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
 ]
-
-[project.scripts]
-de = "dry_exec.cli:main"
-dex = "dry_exec.cli:main"
-dry-exec = "dry_exec.cli:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["python", "."]

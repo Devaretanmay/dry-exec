@@ -35,9 +35,7 @@ from dry_exec.models import (
     PageMutation,
     StateDelta,
 )
-from dry_exec.observability import DeltaLogger
 from dry_exec.schemas import Action, Environment, MockResponse
-from dry_exec.telemetry import TelemetryExporter
 
 
 def _exec_coro_safely(coro):
@@ -226,8 +224,6 @@ __all__ = [
     "is_escalated",
     "parse_decision",
     "enforce_escalation",
-    "DeltaLogger",
-    "TelemetryExporter",
     "DryExecError",
     "SchemaViolationError",
     "SyscallBoundaryError",

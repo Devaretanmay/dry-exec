@@ -3,14 +3,8 @@
 import pytest
 import dry_exec.client
 
-try:
-    from examples.use_cases.api_payment_exploration import run_api_payment_exploration
-    from examples.use_cases.type_safe_db_migration import (
-        run_self_correcting_db_migration,
-    )
-except ImportError:
-    from examples.api_payment_exploration import run_api_payment_exploration
-    from examples.type_safe_db_migration import run_self_correcting_db_migration
+from examples.api_payment_exploration import run_api_payment_exploration
+from examples.type_safe_db_migration import run_self_correcting_db_migration
 
 
 @pytest.fixture(autouse=True)

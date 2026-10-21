@@ -8,9 +8,6 @@ from dry_exec import (
     MockResponse,
     StateDelta,
 )
-from dry_exec.observability import DeltaLogger
-
-logger = DeltaLogger()
 
 
 async def run_api_payment_exploration():
@@ -40,8 +37,6 @@ async def run_api_payment_exploration():
         payload={"currency": "usd", "amount": 2500, "customer": "cus_1234"},
     )
 
-    logger.render_action_header(env, charge_action)
-
     # 3. Execute in ephemeral isolation; the execution layer reaches the mock listener bound
     #    inside its own network namespace, served by the control plane transparent proxy
     delta: StateDelta = await client.execute_ephemeral_action(
@@ -53,9 +48,6 @@ async def run_api_payment_exploration():
             '{"amount": 2500, "customer": "cus_1234"}',
         ),
     )
-
-    # 4. Render observability receipt
-    logger.render_delta(delta)
 
     # 5. Assert deterministic boundary behavior: the request was intercepted and mocked
     assert len(delta.network_mutations) == 1
@@ -69,7 +61,6 @@ async def run_api_payment_exploration():
     assert registered_route.status_code == 200
     assert "ch_mock_9988" in registered_route.body
 
-    logger.render_commit_prompt(confirmed=True)
     print(
         "\n[SUCCESS] Transparent proxy intercepted the outbound charge and returned the "
         "schema-driven mock response."

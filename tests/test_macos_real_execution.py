@@ -27,3 +27,62 @@ async def test_macos_real_command_captures_stdout():
     assert delta.exit_code == 0
     assert delta.stdout == b"hello\n"
     assert delta.stderr == b""
+
+
+@pytest.mark.asyncio
+async def test_macos_real_command_separates_stdout_and_stderr():
+    action = Action(
+        action_id="macos_stdio_002",
+        target_resource="shell_command",
+        mutation_type="execute",
+        payload={"command": ["/bin/sh", "-c", "printf 'std_out_data\n'; printf 'std_err_data\n' >&2"]},
+    )
+    delta = await DryExecClient().execute_ephemeral_action(
+        Environment(name="macos-stdio-separation", allowed_mutation_targets={"*"}),
+        action,
+    )
+
+    assert delta.exit_code == 0
+    assert delta.stdout == b"std_out_data\n"
+    assert delta.stderr == b"std_err_data\n"
+
+
+@pytest.mark.asyncio
+async def test_macos_real_command_executes_system_binary_in_allowed_exec_path():
+    action = Action(
+        action_id="macos_date_003",
+        target_resource="shell_command",
+        mutation_type="execute",
+        payload={"command": ["/bin/date", "+%Y"]},
+    )
+    delta = await DryExecClient().execute_ephemeral_action(
+        Environment(name="macos-date-exec", allowed_mutation_targets={"*"}),
+        action,
+    )
+
+    assert delta.exit_code == 0
+    assert delta.stdout.strip().isdigit()
+    assert len(delta.stdout.strip()) == 4
+    assert delta.stderr == b""
+
+
+@pytest.mark.asyncio
+async def test_macos_credential_paths_are_denied():
+    import os
+
+    home = os.environ.get("HOME", "/tmp")
+    action = Action(
+        action_id="macos_secret_004",
+        target_resource="shell_command",
+        mutation_type="execute",
+        payload={"command": ["/bin/sh", "-c", f"ls {home}/.ssh 2>&1"]},
+    )
+    delta = await DryExecClient().execute_ephemeral_action(
+        Environment(name="macos-cred-deny", allowed_mutation_targets={"*"}),
+        action,
+    )
+
+    # If ~/.ssh exists, reading is denied by Seatbelt (Operation not permitted)
+    if os.path.exists(f"{home}/.ssh"):
+        assert delta.exit_code != 0 or b"Operation not permitted" in delta.stdout
+        assert b"Operation not permitted" in delta.stdout or b"denied" in delta.stdout or delta.exit_code != 0

@@ -27,7 +27,7 @@
   - Rich-formatted `DeltaLogger` output displaying state delta receipts.
 - **Loop 7: Production Examples** (`examples/`):
   - `examples/getting_started/`: Minimal 10-line setup.
-  - `examples/use_cases/`: Self-correcting DB migrations and API payment exploration.
+  - `examples/`: Self-correcting DB migrations and API payment exploration.
   - `examples/integrations/`: LangChain tool wrapper.
 - **Loop 8: Production Restructuring & CI/CD** (`.github/`, `docker/`, `scripts/`):
   - GitHub Actions workflows for CI, linting, and releases.
@@ -39,10 +39,8 @@ All documentation and implementations must maintain engineering precision withou
 
 ## Build & Test Instructions
 - **Rust Core Check**:
-  `cargo check --workspace --tests --target x86_64-unknown-linux-gnu`
+  `cargo check --workspace --tests`
 - **Unit & Integration Tests**:
-  `python3 -m pytest tests/test_examples.py tests/test_cli.py tests/test_sdk.py -v`
+  `python3 -m pytest tests/ -v`
 - **Containerized Verification Matrix**:
   `./docker/build.sh && docker run --rm --privileged --cap-add=SYS_ADMIN --cap-add=SYS_PTRACE dry-exec-test-harness`
-- **Gate Checking**:
-  `node ~/.gemini/config/skills/unlazy/scripts/gate-check.mjs GATES.md`
