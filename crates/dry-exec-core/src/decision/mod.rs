@@ -45,9 +45,10 @@ pub fn evaluate(summary: &DeltaSummary, environment: &Environment) -> DecisionRe
     let risk_score =
         Score::new(bytes_ratio * BYTE_TERM_WEIGHT + network_ratio * NETWORK_TERM_WEIGHT);
 
-    let choice = if summary.deferred_execution_hazards > 0 {
-        Choice::Violated
-    } else if bytes_ratio > Score::MAX || network_ratio > Score::MAX {
+    let choice = if summary.deferred_execution_hazards > 0
+        || bytes_ratio > Score::MAX
+        || network_ratio > Score::MAX
+    {
         Choice::Violated
     } else if summary.schema_breaches > 0 {
         Choice::Blocked
