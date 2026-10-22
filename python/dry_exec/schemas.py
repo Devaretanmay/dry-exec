@@ -52,7 +52,7 @@ class Environment(BaseModel):
     )
     allowed_filesystem_roots: List[str] = Field(
         default_factory=lambda: ["/tmp/dry_exec_ephemeral"],
-        description="Isolated ephemeral filesystem paths accessible to the execution layer",
+        description="Ephemeral filesystem roots accessible to the execution layer; the first entry is mounted as the writable ephemeral root",
     )
     allowed_api_endpoints: Dict[str, MockResponse] = Field(
         default_factory=dict,

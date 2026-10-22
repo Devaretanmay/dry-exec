@@ -7,8 +7,8 @@ use dry_exec_core::delta::{
 };
 use dry_exec_core::error::BoundaryExitStatus;
 use dry_exec_core::isolation::{
-    execute_isolated_process, execute_isolated_process_with_inspection, ProcessBoundaryConfig,
-    SeccompFilter, SyscallAction,
+    execute_isolated_process, execute_isolated_process_with_inspection, MountConfig,
+    ProcessBoundaryConfig, SeccompFilter, SyscallAction,
 };
 use std::time::Instant;
 
@@ -69,6 +69,32 @@ fn test_assertion_a_syscall_isolation_interception() {
 }
 
 #[test]
+fn test_setup_failure_returns_without_blocking() {
+    // A child that fails before the readiness handshake must surface an error immediately. A
+    // leaked copy of the child's socket end in the parent turns this into a blocking read.
+    let config = ProcessBoundaryConfig {
+        mount_config: MountConfig {
+            tmpfs_path: std::path::PathBuf::from("/proc/dry_exec_unwritable/tmpfs"),
+            mount_sterile_proc: false,
+        },
+        ..trap_boundary_config()
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let outcome = execute_isolated_process(&config, || {})
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+        let _ = tx.send(outcome);
+    });
+
+    let outcome = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("boundary setup failure blocked the control plane instead of returning");
+    assert!(outcome.is_err(), "expected a setup error, observed success");
+}
+
+#[test]
 fn test_assertion_b_state_delta_precision() {
     // Assertion B: Map a 10MB anonymous memory region. Instruct the isolated child to mutate
     // exactly 8 bytes at offset 4096 (Page 1) and 4 bytes at offset 12288 (Page 3).
@@ -92,7 +118,15 @@ fn test_assertion_b_state_delta_precision() {
     // Hand the isolated action a path only: moving the `TempDir` guard into the child would
     // unlink the ephemeral directory from inside the boundary when the closure is dropped.
     let ephemeral_root = temp_dir.path().to_path_buf();
-    let config = trap_boundary_config();
+    // Mount the ephemeral tmpfs over the temporary directory so the child's filesystem mutation
+    // lands in the ephemeral overlay; the host tree is read-only inside the mount namespace.
+    let config = ProcessBoundaryConfig {
+        mount_config: MountConfig {
+            tmpfs_path: ephemeral_root.clone(),
+            mount_sterile_proc: true,
+        },
+        ..trap_boundary_config()
+    };
 
     let (exit_status, inspected) = execute_isolated_process_with_inspection(
         &config,

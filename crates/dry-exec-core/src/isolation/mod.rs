@@ -10,7 +10,10 @@ pub mod process;
 pub mod seccomp;
 
 #[cfg(target_os = "linux")]
-pub use mount::{mount_ephemeral_tmpfs, set_mount_propagation_private, MountConfig};
+pub use mount::{
+    mount_ephemeral_tmpfs, mount_sterile_proc, restrict_root_readonly,
+    set_mount_propagation_private, MountConfig,
+};
 #[cfg(target_os = "linux")]
 pub use namespace::{bring_loopback_up, NamespaceFlags};
 #[cfg(target_os = "linux")]

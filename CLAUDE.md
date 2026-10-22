@@ -6,12 +6,13 @@
 ## Repository Architecture & Loops
 - **Loop 1: Kernel Isolation Boundary** (`crates/dry-exec-core/src/isolation/`):
   - Linux namespaces (`CLONE_NEWPID`, `CLONE_NEWNET`, `CLONE_NEWNS`, `CLONE_NEWIPC`, `CLONE_NEWUTS`).
+  - Host-backed mounts remounted read-only inside the mount namespace; only the ephemeral root, a sterile `/proc`, and device nodes remain writable.
   - `seccomp-bpf` cBPF filter compiler with `SECCOMP_RET_TRAP` for syscall interception.
   - IPC sync socketpair for child-parent lifecycle coordination.
 - **Loop 2: State Delta Engine** (`crates/dry-exec-core/src/delta/`):
   - Copy-on-Write (CoW) memory mapping (`MAP_PRIVATE`).
   - Kernel soft-dirty bitfield tracking via `/proc/[pid]/pagemap` in $O(P_{\text{dirty}})$ time.
-  - Ephemeral `tmpfs` inode diffing for filesystem mutations.
+  - Ephemeral `tmpfs` inode diffing for filesystem mutations on Linux; APFS `clonefile` baseline diffing on macOS.
 - **Loop 3: Type-Safe Python SDK & PyO3 FFI** (`crates/dry-exec-pyo3/`, `python/dry_exec/`):
   - Pydantic V2 synchronous schema validation (`Environment`, `Action`).
   - Non-blocking PyO3 FFI bridge releasing Python GIL via `py.allow_threads`.
@@ -20,17 +21,12 @@
   - Loopback network namespace redirection.
   - Deterministic schema mocking with 500ms timeout bound.
   - `network_mutations` recorded in `StateDelta`.
-- **Loop 5: Developer CLI** (`python/dry_exec/cli.py`):
-  - Typer-powered commands: `run`, `inspect`, `version`.
-  - Human-in-the-loop commit confirmation before durable execution.
-- **Loop 6: Observability & Receipts** (`python/dry_exec/observability.py`):
-  - Rich-formatted `DeltaLogger` output displaying state delta receipts.
-- **Loop 7: Production Examples** (`examples/`):
+- **Loop 5: Production Examples** (`examples/`):
   - `examples/getting_started/`: Minimal 10-line setup.
   - `examples/`: Self-correcting DB migrations and API payment exploration.
   - `examples/integrations/`: LangChain tool wrapper.
-- **Loop 8: Production Restructuring & CI/CD** (`.github/`, `docker/`, `scripts/`):
-  - GitHub Actions workflows for CI, linting, and releases.
+- **Loop 6: Production Restructuring & CI/CD** (`.github/`, `docker/`, `scripts/`):
+  - GitHub Actions workflows for CI, linting, and releases, including macOS native verification.
   - Pre-commit configurations and developer shell helpers.
 
 ## Linguistic Compliance Directives

@@ -27,6 +27,33 @@ jobs:
       - name: Cargo Test (Host-Permitted Units)
         run: cargo test --lib --workspace
 
+  macos-native-verification:
+    name: macOS Native Boundary
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2.7.7
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Cargo Test Workspace
+        run: cargo test --workspace
+      - name: Build Python Extension
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install "maturin>=1.5,<2.0" "pytest>=8.0" "pytest-asyncio>=0.23" "pydantic>=2.0"
+          maturin develop
+      - name: macOS Native Execution Tests
+        run: |
+          source .venv/bin/activate
+          python -m pytest tests/test_macos_real_execution.py -v
+
   container-verification-matrix:
     name: Containerized Kernel Boundary & Python SDK
     runs-on: ubuntu-latest

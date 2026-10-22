@@ -74,6 +74,38 @@ impl Drop for TempCaptureFile {
     }
 }
 
+/// RAII directory used for the pre-execution filesystem snapshot on macOS.
+#[cfg(target_os = "macos")]
+struct TempDirectory {
+    path: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+impl TempDirectory {
+    fn new(label: &str) -> Result<Self, String> {
+        let pid = std::process::id();
+        let seq = CAPTURE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| format!("snapshot clock error: {e}"))?
+            .as_nanos();
+        Ok(Self {
+            path: std::env::temp_dir().join(format!("dry_exec_{label}_{pid}_{seq}_{nonce}")),
+        })
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for TempDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 create_exception!(_dry_exec_ffi, IsolationSetupError, PyException);
 create_exception!(_dry_exec_ffi, SyscallBoundaryError, PyException);
 create_exception!(_dry_exec_ffi, StateDeltaComputationError, PyException);
@@ -211,7 +243,7 @@ fn execute_isolated_action(
                 if let Some(argv) = command_for_child {
                     if let Some(program) = argv.first() {
                         let mut process = Command::new(program);
-                        process.args(&argv[1..]);
+                        process.args(&argv[1..]).current_dir(&tmpfs_path);
                         if let Some(port) = proxy_port {
                             let proxy = format!("http://127.0.0.1:{port}");
                             process
@@ -345,6 +377,12 @@ fn execute_isolated_action(
         let scratch_dir = std::fs::canonicalize(&requested_scratch_dir)
             .unwrap_or(requested_scratch_dir);
 
+        // Snapshot the scratch root before execution so later deltas report modifications and
+        // deletions, not just files that happen to remain at the end of the trial.
+        let baseline_dir = TempDirectory::new("baseline")?;
+        dry_exec_core::delta::apfs_clone_directory(&scratch_dir, baseline_dir.path())
+            .map_err(|e| format!("Filesystem baseline snapshot error: {e}"))?;
+
         let proxy_port = if let Some(endpoints) = mock_endpoints {
             let mut schema = NetworkMockSchema::new();
             for (method, path, status_code, headers, body) in endpoints {
@@ -467,7 +505,7 @@ fn execute_isolated_action(
         }
 
         let mut delta = coordinator
-            .compute_macos_delta(None, Some(&scratch_dir))
+            .compute_macos_delta(Some(baseline_dir.path()), Some(&scratch_dir))
             .map_err(|e| format!("Delta computation error: {e}"))?;
 
         if command.is_some() {
@@ -534,9 +572,20 @@ fn execute_isolated_action(
                         fs_dict.set_item("mode", mode)?;
                         fs_dict.set_item("size", size)?;
                     }
-                    dry_exec_core::delta::FsMutation::Modified { path, deltas: _ } => {
+                    dry_exec_core::delta::FsMutation::Modified { path, deltas } => {
                         fs_dict.set_item("mutation_type", "modified")?;
                         fs_dict.set_item("path", path.to_string_lossy())?;
+                        let deltas_list = PyList::empty(py);
+                        for byte_delta in deltas {
+                            let delta_dict = PyDict::new(py);
+                            delta_dict.set_item("offset", byte_delta.offset)?;
+                            delta_dict
+                                .set_item("original", PyBytes::new(py, &byte_delta.original))?;
+                            delta_dict
+                                .set_item("mutated", PyBytes::new(py, &byte_delta.mutated))?;
+                            deltas_list.append(delta_dict)?;
+                        }
+                        fs_dict.set_item("deltas", deltas_list)?;
                     }
                     dry_exec_core::delta::FsMutation::Deleted { path } => {
                         fs_dict.set_item("mutation_type", "deleted")?;

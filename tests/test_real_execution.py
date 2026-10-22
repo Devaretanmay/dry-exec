@@ -48,6 +48,28 @@ async def test_real_command_captures_output_and_filesystem_delta(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_real_command_cannot_write_outside_ephemeral_root():
+    host_path = Path("/tmp/dex_loop15_host_write_attempt.txt")
+    host_path.unlink(missing_ok=True)
+    env = Environment(
+        name="loop15_write_boundary",
+        allowed_mutation_targets={"*"},
+        allowed_filesystem_roots=["/tmp/dry_exec_ephemeral"],
+    )
+    action = Action(
+        action_id="loop15_command_003",
+        target_resource="shell_command",
+        mutation_type="execute",
+        payload={"command": ["/bin/sh", "-c", f"printf leak > {host_path}"]},
+    )
+
+    delta: StateDelta = await DryExecClient().execute_ephemeral_action(env, action)
+
+    assert delta.exit_code != 0
+    assert not host_path.exists()
+
+
+@pytest.mark.asyncio
 async def test_real_command_nonzero_exit_is_reported():
     env = Environment(name="loop15_exit", allowed_mutation_targets={"*"})
     action = Action(

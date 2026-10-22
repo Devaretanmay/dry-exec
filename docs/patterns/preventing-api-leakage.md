@@ -49,4 +49,4 @@ asyncio.run(run_payment_trial())
 1. **Loopback rerouting**: On Linux, `CLONE_NEWNET` leaves network interfaces unconfigured except for loopback, forcing traffic through the local proxy. On macOS, Seatbelt and proxy environment variables redirect outbound requests.
 2. **HTTPS handling**: HTTPS requests via HTTP `CONNECT` tunneling receive an ephemeral per-host certificate generated dynamically in memory.
 3. **Deterministic auditing**: Every intercepted request is captured in `delta.network_mutations`, including request method, path, headers, request body, and mock response status.
-4. **Schema breach detection**: If your code calls an unregistered endpoint (e.g., `POST https://api.sendgrid.com/v3/mail/send`), the proxy returns HTTP 403 Forbidden and increments `delta.schema_breaches`.
+4. **Schema breach detection**: If your code calls an unregistered endpoint (e.g., `POST https://api.sendgrid.com/v3/mail/send`), the proxy returns HTTP 400 Bad Request and increments `delta.schema_breaches`.

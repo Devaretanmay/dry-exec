@@ -2,7 +2,10 @@
 
 use crate::delta::network::{bind_loopback_listener, NetworkBoundary, TransparentProxy};
 use crate::error::{BoundaryExitStatus, IsolationError};
-use crate::isolation::mount::{mount_ephemeral_tmpfs, set_mount_propagation_private, MountConfig};
+use crate::isolation::mount::{
+    mount_ephemeral_tmpfs, mount_sterile_proc, restrict_root_readonly,
+    set_mount_propagation_private, MountConfig,
+};
 use crate::isolation::namespace::{bring_loopback_up, NamespaceFlags};
 use crate::isolation::seccomp::SeccompFilter;
 use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
@@ -390,8 +393,23 @@ where
 
         // 1. Mount boundary setup
         if payload.config.namespaces.contains(NamespaceFlags::MOUNT) {
-            let _ = set_mount_propagation_private();
-            let _ = mount_ephemeral_tmpfs(&payload.config.mount_config.tmpfs_path);
+            if set_mount_propagation_private().is_err() {
+                unsafe { libc::_exit(4) }
+            }
+            // The ephemeral root must exist before the host tree is made read-only; mounting the
+            // tmpfs over it afterwards keeps only that path writable inside the boundary.
+            if std::fs::create_dir_all(&payload.config.mount_config.tmpfs_path).is_err() {
+                unsafe { libc::_exit(4) }
+            }
+            if restrict_root_readonly().is_err() {
+                unsafe { libc::_exit(4) }
+            }
+            if mount_ephemeral_tmpfs(&payload.config.mount_config.tmpfs_path).is_err() {
+                unsafe { libc::_exit(4) }
+            }
+            if payload.config.mount_config.mount_sterile_proc && mount_sterile_proc().is_err() {
+                unsafe { libc::_exit(4) }
+            }
         }
 
         // 2. Notify parent control plane: child ready for baseline reset. When a network boundary
@@ -456,9 +474,21 @@ where
 
     let pid = Pid::from_raw(child_pid);
 
+    // The child took a copy-on-write copy of the payload. Release the parent's copy so the
+    // configuration and the child's socket end do not leak across trials; closing the parent's
+    // descriptor also makes a premature child exit observable as EOF instead of blocking.
+    drop(unsafe { Box::from_raw(payload_ptr) });
+
     // Coordinate with child across synchronization boundary: the readiness frame carries the
     // isolated network namespace's mock listener descriptor when a network boundary is configured.
     let (ready_byte, forwarded_listener) = recv_boundary_ready(parent_sock.as_raw_fd());
+
+    if ready_byte != BOUNDARY_READY {
+        terminate_child(pid);
+        return Err(IsolationError::SyncError(format!(
+            "Isolated execution layer {child_pid} exited before completing the readiness handshake"
+        )));
+    }
 
     // Serve the forwarded listener on the control plane. The listener stays bound inside the
     // isolated network namespace, so connections originating there reach this proxy.
@@ -480,29 +510,34 @@ where
                     .to_string(),
             ));
         }
-        (None, _) => None,
+        (None, Some(_)) => {
+            terminate_child(pid);
+            return Err(IsolationError::SyncError(
+                "Isolated execution layer did not forward its network boundary listener"
+                    .to_string(),
+            ));
+        }
+        (None, None) => None,
     };
 
-    if ready_byte == BOUNDARY_READY {
-        // Reset kernel page-table tracking for child: write "4\n" to /proc/[pid]/clear_refs
-        let clear_refs_path = format!("/proc/{}/clear_refs", child_pid);
-        let clear_result = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&clear_refs_path)
-            .and_then(|mut file| {
-                use std::io::Write;
-                file.write_all(b"4\n")
-            });
-        if let Err(error) = clear_result {
-            terminate_child(pid);
-            return Err(IsolationError::SyncError(format!(
-                "Failed to reset soft-dirty tracking for child {child_pid}: {error}"
-            )));
-        }
-
-        // Send ACK byte to release child into action execution
-        send_control_byte(parent_sock.as_raw_fd(), 1);
+    // Reset kernel page-table tracking for child: write "4\n" to /proc/[pid]/clear_refs
+    let clear_refs_path = format!("/proc/{}/clear_refs", child_pid);
+    let clear_result = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&clear_refs_path)
+        .and_then(|mut file| {
+            use std::io::Write;
+            file.write_all(b"4\n")
+        });
+    if let Err(error) = clear_result {
+        terminate_child(pid);
+        return Err(IsolationError::SyncError(format!(
+            "Failed to reset soft-dirty tracking for child {child_pid}: {error}"
+        )));
     }
+
+    // Send ACK byte to release child into action execution
+    send_control_byte(parent_sock.as_raw_fd(), 1);
 
     // Await the completion frame: a boundary breach record or a clean-completion marker
     let mut tag = [0u8; 1];

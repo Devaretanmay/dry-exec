@@ -43,12 +43,13 @@ deterministic decision path; neural output never overrides a deterministic refus
 1. **Namespace Isolation**:
    - `CLONE_NEWPID`: Child processes cannot signal, trace, or observe host processes.
    - `CLONE_NEWNET`: Default loopback-only environment; external interfaces are unconfigured, forcing network requests through the transparent proxy.
-   - `CLONE_NEWNS`: Mount table is unshared with `MS_REC | MS_PRIVATE`. Sterile `/proc` and private `tmpfs` mounts prevent host filesystem alteration.
+   - `CLONE_NEWNS`: Mount table is unshared with `MS_REC | MS_PRIVATE`. Every host-backed mount is then remounted read-only, then a private `tmpfs` is mounted over the ephemeral root and a sterile `/proc` is mounted over the host view. Only the ephemeral root, the sterile `/proc`, and device nodes stay writable inside the boundary.
    - `CLONE_NEWIPC` & `CLONE_NEWUTS`: IPC queues and system hostnames are isolated.
 
 2. **Syscall Interception (`seccomp-bpf`)**:
-   - Evaluates system calls against an explicit allowlist.
+   - The deterministic action path evaluates system calls against an explicit allowlist.
    - Disallowed system calls generate `SECCOMP_RET_TRAP` (triggering `SIGSYS`), causing the isolation boundary to intercept the violation, record the instruction pointer and syscall number, and abort execution.
+   - Arbitrary commands (`Action.payload["command"]`) receive a permissive filter because their runtime syscall surface is unbounded; the mount namespace read-only remount and the network namespace are the enforcement boundary for those commands.
 
 3. **Memory & State Mutation Tracking**:
    - Processes execute against Copy-on-Write (CoW) memory mappings (`MAP_PRIVATE`).

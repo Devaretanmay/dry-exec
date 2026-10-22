@@ -204,7 +204,14 @@ class DryExecClient:
                     path=fm["path"],
                     mode=fm.get("mode"),
                     size=fm.get("size"),
-                    deltas=[],
+                    deltas=[
+                        ByteDelta(
+                            offset=d["offset"],
+                            original=bytes(d["original"]),
+                            mutated=bytes(d["mutated"]),
+                        )
+                        for d in fm.get("deltas", [])
+                    ],
                 )
             )
 

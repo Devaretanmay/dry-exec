@@ -8,7 +8,7 @@ Explore state mutations without consequences. Commit only what you approve.
 
 [![PyPI](https://img.shields.io/pypi/v/dry-exec.svg)](https://pypi.org/project/dry-exec/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-1.70+-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.80+-orange.svg)](https://www.rust-lang.org/)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-green.svg)](#architecture-dual-backend-engine)
 [![CI](https://github.com/Devaretanmay/dry-exec/actions/workflows/ci.yml/badge.svg)](https://github.com/Devaretanmay/dry-exec/actions/workflows/ci.yml)
@@ -77,6 +77,8 @@ async def main():
 asyncio.run(main())
 ```
 
+`result.committed` reflects the decision layer's routing: `True` means the delta was cleared for auto-commit, not that the Agent replayed mutations to durable storage. Durable commit remains the caller's responsibility.
+
 <br>
 
 ### 2. Direct ephemeral client execution
@@ -104,6 +106,8 @@ async def main():
 asyncio.run(main())
 ```
 
+Commands execute with their working directory set to the ephemeral root. Absolute paths outside that root are read-only inside the Linux mount namespace.
+
 <br>
 
 ### 3. The `@dry_exec.dry_run` decorator
@@ -115,12 +119,15 @@ import dry_exec
 
 @dry_exec.dry_run
 def update_balance(account_id: str, amount: int):
-    # Runs in ephemeral sandbox; database and host files are untouched
-    db.execute("UPDATE accounts SET balance = balance + $1 WHERE id = $2", amount, account_id)
+    # Self-contained: the function is serialized and executed in the isolated child process.
+    with open("/tmp/dry_exec_ephemeral/balance_receipt.txt", "w") as receipt:
+        receipt.write(f"{account_id}:{amount}")
 
 delta = update_balance("acc_101", 500)
 print(f"{delta.total_bytes_mutated} bytes mutated in {delta.duration_nanos}ns")
 ```
+
+The decorator serializes the function and its arguments; helpers, globals, and database handles from the parent process are not available inside the boundary. Use `Action.payload["command"]` for arbitrary commands; other payload keys remain schema metadata.
 
 Or execute arbitrary commands directly via functional `dry_exec.run()`:
 
@@ -132,7 +139,7 @@ delta = dry_exec.run("python seed_data.py")
 
 ## Architecture: dual-backend engine
 
-`dry-exec` features a **native dual-backend architecture**. It automatically detects the host operating system and compiles to native kernel primitives with sub-millisecond execution latencies:
+`dry-exec` features a **native dual-backend architecture**. It automatically detects the host operating system and compiles to native kernel primitives. Decision routing is sub-millisecond; end-to-end latency is dominated by the executed action:
 
 ```
                             dry-exec architecture
@@ -143,8 +150,9 @@ delta = dry_exec.run("python seed_data.py")
    (Production & Cloud)                                  (Local Development)
 ─────────────────────────                             ─────────────────────────
 • Linux Namespaces (PID, NET, MNT)                    • Apple Seatbelt (sandbox_init)
-• seccomp-BPF TRAP filter                             • APFS Copy-on-Write (clonefile)
-• /proc/[pid]/pagemap soft-dirty                      • Transparent Loopback Proxy
+• Read-only host remount + sterile /proc              • APFS Copy-on-Write (clonefile)
+• seccomp-BPF TRAP filter                             • Transparent Loopback Proxy
+• /proc/[pid]/pagemap soft-dirty
 • Zero Docker needed                                  • Zero Docker needed
 ```
 

@@ -152,12 +152,14 @@ impl SeccompFilter {
             },
         ];
 
-        // 3. Trap selected syscalls before evaluating the allow list.
+        // 3. Trap selected syscalls before evaluating the allow list. On a match the jump
+        //    falls through to the TRAP instruction; on a miss it skips over it so the rest of
+        //    the runtime surface stays reachable.
         for &syscall_nr in &self.trapped_syscalls {
             filter.push(libc::sock_filter {
                 code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
                 jt: 0,
-                jf: 0,
+                jf: 1,
                 k: syscall_nr as u32,
             });
             filter.push(libc::sock_filter {
@@ -233,5 +235,27 @@ impl SeccompFilter {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trapped_syscall_skips_trap_when_unmatched() {
+        let filter = SeccompFilter::new(SyscallAction::Allow).trap(libc::SYS_socket);
+        let program = filter.compile_bpf();
+
+        // Architecture check (3) and syscall load (1) precede the trap rule.
+        let trap_jump = &program[4];
+        assert_eq!(
+            trap_jump.code,
+            (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16
+        );
+        assert_eq!(trap_jump.k, libc::SYS_socket as u32);
+        assert_eq!(trap_jump.jt, 0);
+        assert_eq!(trap_jump.jf, 1);
+        assert_eq!(program[5].k, libc::SECCOMP_RET_TRAP);
     }
 }

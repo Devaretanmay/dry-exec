@@ -4,7 +4,6 @@ Covers the Python-side mapping and escalation routing, the CLI and autonomous ex
 gates, and end-to-end routing produced by the Rust decision layer across the FFI boundary.
 """
 
-import re
 import sys
 
 import pytest
@@ -34,11 +33,6 @@ def _receipt(
         noul_trigger=noul_trigger,
         reason=reason,
     )
-
-
-def _plain(output: str) -> str:
-    """Collapse Rich panel borders and line wrapping so assertions read the rendered text."""
-    return " ".join(re.sub(r"[│╭╮╰╯─┬┴┼]", " ", output).split())
 
 
 def _escalated_delta() -> StateDelta:

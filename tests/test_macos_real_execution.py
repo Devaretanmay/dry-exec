@@ -73,6 +73,39 @@ async def test_macos_real_command_executes_system_binary_in_allowed_exec_path():
 
 
 @pytest.mark.asyncio
+async def test_macos_real_command_reports_filesystem_delta(tmp_path):
+    (tmp_path / "existing.txt").write_text("before")
+
+    action = Action(
+        action_id="macos_fs_delta_005",
+        target_resource="shell_command",
+        mutation_type="execute",
+        payload={
+            "command": [
+                "/bin/sh",
+                "-c",
+                "printf 'after' > existing.txt; printf 'new' > created.txt",
+            ]
+        },
+    )
+    delta = await DryExecClient().execute_ephemeral_action(
+        Environment(
+            name="macos-fs-delta",
+            allowed_mutation_targets={"*"},
+            allowed_filesystem_roots=[str(tmp_path)],
+        ),
+        action,
+    )
+
+    assert delta.exit_code == 0
+    mutations = {mutation.path: mutation for mutation in delta.fs_mutations}
+    assert mutations["created.txt"].mutation_type == "created"
+    modified = mutations["existing.txt"]
+    assert modified.mutation_type == "modified"
+    assert b"after" in b"".join(part.mutated for part in modified.deltas)
+
+
+@pytest.mark.asyncio
 async def test_macos_credential_paths_are_denied():
     import os
 
