@@ -286,3 +286,49 @@ async def test_sandboxed_mcp_tool_decorator_and_call():
     )
     assert res.result == "Hello, PostHog"
     assert res.committed is False
+
+
+@pytest.mark.asyncio
+async def test_reproduce_standalone_trial_rollback_wipes_scratch():
+    """Reproducer: Standalone trial without workspace_dir must allocate scratch and wipe it on rollback."""
+    client = DryExecClient(ffi_module=MockFFI())
+    env = Environment()
+    action = Action(
+        action_id="act_standalone",
+        target_resource="fs",
+        mutation_type="execute",
+    )
+
+    trial = await client.run_trial(env, action, workspace_dir=None)
+    assert trial._scratch_dir is not None
+    scratch_path = Path(trial._scratch_dir)
+    assert scratch_path.exists()
+
+    await trial.rollback()
+    assert trial.is_rolled_back
+    assert not scratch_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_reproduce_mcp_tool_mutation_contained_in_scratch():
+    """Reproducer: Tool mutations must be isolated in scratch and not leak to workspace on rollback."""
+    with tempfile.TemporaryDirectory() as target_ws:
+        ws_file = Path(target_ws) / "leaked.txt"
+
+        def mutating_tool():
+            # Attempts to write to target workspace or current dir
+            Path("leaked.txt").write_text("should be rolled back")
+            return {"status": "wrote"}
+
+        client = DryExecClient()
+        res = await sandboxed_mcp_call(
+            mutating_tool,
+            workspace_dir=target_ws,
+            auto_commit=False,
+            client=client,
+        )
+
+        assert res.result == {"status": "wrote"}
+        assert res.committed is False
+        assert not ws_file.exists()
+        assert not Path("leaked.txt").exists()

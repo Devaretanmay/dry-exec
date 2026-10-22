@@ -43,7 +43,8 @@ impl Default for SeatbeltConfig {
                 PathBuf::from("/bin"),
                 PathBuf::from("/usr/bin"),
                 PathBuf::from("/usr/local/bin"),
-                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/opt/homebrew"),
+                PathBuf::from("/Library/Developer"),
             ],
             allow_loopback_network: true,
             allow_process_exec: true,
@@ -82,6 +83,7 @@ pub fn generate_seatbelt_profile(config: &SeatbeltConfig) -> String {
     sbpl.push_str("(allow file-read* (literal \"/dev/urandom\"))\n");
     // dyld reads root directory entry during process startup.
     sbpl.push_str("(allow file-read-data (literal \"/\"))\n");
+    sbpl.push_str("(allow file-read-metadata)\n");
     sbpl.push_str("(allow file-write-data (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/dtracehelper\"))\n");
     sbpl.push_str("(allow file-ioctl (literal \"/dev/dtracehelper\") (literal \"/dev/null\"))\n\n");
 

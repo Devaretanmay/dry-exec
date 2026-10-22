@@ -451,27 +451,30 @@ class DryExecClient:
         directory. Action runs in the scratch directory. The target workspace remains unmodified
         until `await trial.commit()` is explicitly called.
         """
-        scratch_dir: Optional[str] = None
-        trial_env = environment
+        scratch_dir: str = tempfile.mkdtemp(prefix="dry_exec_trial_")
 
         if workspace_dir is not None:
-            scratch_dir = tempfile.mkdtemp(prefix="dry_exec_trial_")
             ws_path = Path(workspace_dir).resolve()
             if ws_path.exists():
                 await asyncio.to_thread(
                     shutil.copytree, str(ws_path), scratch_dir, dirs_exist_ok=True
                 )
 
-            trial_env = environment.model_copy(
-                update={"allowed_filesystem_roots": [scratch_dir]}
-            )
-
-        delta = await self.execute_ephemeral_action(
-            trial_env,
-            action,
-            trigger_blocked_syscall=trigger_blocked_syscall,
-            request_to_trigger=request_to_trigger,
+        trial_env = environment.model_copy(
+            update={"allowed_filesystem_roots": [scratch_dir]}
         )
+
+        try:
+            delta = await self.execute_ephemeral_action(
+                trial_env,
+                action,
+                trigger_blocked_syscall=trigger_blocked_syscall,
+                request_to_trigger=request_to_trigger,
+            )
+        except Exception:
+            if os.path.exists(scratch_dir):
+                shutil.rmtree(scratch_dir, ignore_errors=True)
+            raise
 
         return Trial(
             delta=delta,
