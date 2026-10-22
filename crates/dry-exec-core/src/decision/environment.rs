@@ -24,6 +24,9 @@ pub struct DeltaSummary {
     /// Number of intercepted routes the transparent proxy refused outside the schema.
     pub schema_breaches: usize,
 
+    /// Number of filesystem mutations targeting persistent execution hooks (.git/hooks, shell rc, .pth).
+    pub deferred_execution_hazards: usize,
+
     /// State delta computation latency in nanoseconds.
     pub duration_nanos: u64,
 }
@@ -31,12 +34,19 @@ pub struct DeltaSummary {
 impl DeltaSummary {
     /// Projects a state delta onto its scalar summary in O(1) time.
     pub fn from_state_delta(delta: &StateDelta) -> Self {
+        let deferred_execution_hazards = delta
+            .fs_mutations
+            .iter()
+            .filter(|m| m.is_deferred_execution_hazard())
+            .count();
+
         Self {
             total_bytes_mutated: delta.total_bytes_mutated,
             memory_pages_mutated: delta.memory_mutations.len(),
             fs_mutations: delta.fs_mutations.len(),
             network_calls: delta.network_mutations.len(),
             schema_breaches: delta.schema_breaches,
+            deferred_execution_hazards,
             duration_nanos: delta.duration_nanos,
         }
     }

@@ -45,7 +45,9 @@ pub fn evaluate(summary: &DeltaSummary, environment: &Environment) -> DecisionRe
     let risk_score =
         Score::new(bytes_ratio * BYTE_TERM_WEIGHT + network_ratio * NETWORK_TERM_WEIGHT);
 
-    let choice = if bytes_ratio > Score::MAX || network_ratio > Score::MAX {
+    let choice = if summary.deferred_execution_hazards > 0 {
+        Choice::Violated
+    } else if bytes_ratio > Score::MAX || network_ratio > Score::MAX {
         Choice::Violated
     } else if summary.schema_breaches > 0 {
         Choice::Blocked
@@ -61,6 +63,10 @@ pub fn evaluate(summary: &DeltaSummary, environment: &Environment) -> DecisionRe
         };
 
     let reason = match (choice, noul_trigger) {
+        (Choice::Violated, _) if summary.deferred_execution_hazards > 0 => format!(
+            "Detected {} deferred execution hazard(s) targeting persistent execution hooks (.git/hooks, shell rc, .pth)",
+            summary.deferred_execution_hazards
+        ),
         (Choice::Violated, _) => format!(
             "Mutation volume {} bytes exceeds calibrated ceiling {} bytes",
             summary.total_bytes_mutated, environment.max_mutated_bytes
@@ -277,6 +283,23 @@ mod tests {
         assert_eq!(receipt.choice, Choice::Blocked);
         assert_eq!(receipt.noul_trigger, Noul::Escalate);
         assert!(receipt.reason.contains("refused 2 route(s)"));
+    }
+
+    #[test]
+    fn test_evaluate_violates_deferred_execution_hazard() {
+        let summary = DeltaSummary {
+            deferred_execution_hazards: 1,
+            total_bytes_mutated: 12,
+            ..Default::default()
+        };
+
+        let receipt = evaluate(&summary, &Environment::default());
+
+        assert_eq!(receipt.choice, Choice::Violated);
+        assert_eq!(receipt.noul_trigger, Noul::Escalate);
+        assert!(receipt
+            .reason
+            .contains("Detected 1 deferred execution hazard(s)"));
     }
 
     #[test]

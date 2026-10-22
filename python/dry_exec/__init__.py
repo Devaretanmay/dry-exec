@@ -11,7 +11,7 @@ import uuid
 from typing import Callable, Optional, Set, Union
 
 from dry_exec.agent import Agent, AgentExecutionResult, DryExecAgent
-from dry_exec.client import DryExecClient
+from dry_exec.client import DryExecClient, Trial
 from dry_exec.decision import (
     enforce_escalation,
     is_escalated,
@@ -24,6 +24,11 @@ from dry_exec.exceptions import (
     SchemaViolationError,
     StateDeltaComputationError,
     SyscallBoundaryError,
+)
+from dry_exec.mcp import (
+    SandboxedToolResult,
+    sandboxed_mcp_call,
+    sandboxed_mcp_tool,
 )
 from dry_exec.models import (
     ByteDelta,
@@ -210,6 +215,10 @@ __all__ = [
     "dry_run",
     "run",
     "DryExecClient",
+    "Trial",
+    "sandboxed_mcp_tool",
+    "sandboxed_mcp_call",
+    "SandboxedToolResult",
     "Environment",
     "Action",
     "MockResponse",

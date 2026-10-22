@@ -39,6 +39,10 @@ The mental model: **`git diff` for runtime execution.**
 | Live API calls during exploration | Schema-driven loopback mock proxy with zero outbound egress |
 | Host mutations during dry-runs | Linux namespaces or macOS Seatbelt/APFS CoW boundaries |
 | Autonomous decisions from raw text | Typed `StateDelta` receipt and $O(1)$ decision routing |
+| Deferred execution escapes (.git/hooks, shell rc, .pth) | Categorical violation routing via deferred execution scanner |
+| Real secret exfiltration during execution | Phantom token masking across stdout, stderr, network, and receipts |
+| Uncontrolled tool side-effects | Zero-dependency MCP sandbox wrapper (`@sandboxed_mcp_tool`) |
+| Unclean state recovery on failure | Atomic `Trial` primitive with rollback by default |
 
 ---
 
@@ -133,6 +137,57 @@ Or execute arbitrary commands directly via functional `dry_exec.run()`:
 
 ```python
 delta = dry_exec.run("python seed_data.py")
+```
+
+<br>
+
+### 4. Atomic Trials: commit or rollback
+
+Test modifications against a target workspace directory. If approved, mutations are applied atomically via temporary file replacement; otherwise, the scratch workspace is discarded with zero host mutations:
+
+```python
+import asyncio
+from dry_exec import Action, Choice, DryExecClient, Environment
+
+async def main():
+    client = DryExecClient()
+    env = Environment()
+    action = Action(
+        action_id="act_migrate",
+        target_resource="app_code",
+        mutation_type="execute",
+        payload={"command": ["/bin/sh", "-c", "echo 'v2' > config.txt"]},
+    )
+
+    async with client.trial(env, action, workspace_dir="./my_project") as trial:
+        print(f"Decision: {trial.decision.choice}, Hazards: {trial.delta.deferred_execution_hazards}")
+        if trial.decision.choice == Choice.ALLOWED:
+            await trial.commit()  # Atomically applies mutations to ./my_project
+        # If uncommitted upon context exit, trial automatically rolls back
+
+asyncio.run(main())
+```
+
+<br>
+
+### 5. Sandboxed MCP tools (Model Context Protocol)
+
+Execute Model Context Protocol tools and agent tool functions inside kernel-level isolation with zero external runtime dependencies:
+
+```python
+import asyncio
+from dry_exec import sandboxed_mcp_tool, SandboxedToolResult
+
+@sandboxed_mcp_tool(auto_commit=True)
+async def execute_query(sql: str) -> str:
+    # Runs inside isolated boundary; persistent hook mutations trigger categorical escalation
+    return "Query executed successfully"
+
+async def main():
+    res: SandboxedToolResult = await execute_query("SELECT 1")
+    print(f"Tool output: {res.result}, Committed: {res.committed}")
+
+asyncio.run(main())
 ```
 
 ---

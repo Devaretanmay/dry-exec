@@ -78,6 +78,10 @@ class Environment(BaseModel):
         le=1.0,
         description="Calibrated risk ceiling; a score above it requires escalation",
     )
+    credential_masks: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Mapping of phantom tokens to real secrets for zero-leakage masking",
+    )
 
     def validate_action(self, action: Action) -> None:
         """Enforces synchronous schema validation before crossing the FFI boundary.

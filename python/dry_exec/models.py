@@ -75,6 +75,10 @@ class FsMutation(BaseModel):
     deltas: List[ByteDelta] = Field(
         default_factory=list, description="Byte deltas for modified files"
     )
+    is_deferred_execution_hazard: bool = Field(
+        default=False,
+        description="Whether the mutation targets persistent execution hooks outside the turn perimeter",
+    )
 
 
 class InterceptedRequest(BaseModel):
@@ -118,6 +122,10 @@ class StateDelta(BaseModel):
     schema_breaches: int = Field(
         default=0,
         description="Intercepted routes the transparent proxy refused outside the schema",
+    )
+    deferred_execution_hazards: int = Field(
+        default=0,
+        description="Count of detected persistent execution hook mutations",
     )
     total_bytes_mutated: int = Field(description="Aggregate count of mutated bytes")
     duration_nanos: int = Field(

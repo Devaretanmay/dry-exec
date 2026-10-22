@@ -538,6 +538,12 @@ fn execute_isolated_action(
             let dict = PyDict::new(py);
             dict.set_item("total_bytes_mutated", delta.total_bytes_mutated)?;
             dict.set_item("schema_breaches", delta.schema_breaches)?;
+            let hazard_count = delta
+                .fs_mutations
+                .iter()
+                .filter(|m| m.is_deferred_execution_hazard())
+                .count();
+            dict.set_item("deferred_execution_hazards", hazard_count)?;
             dict.set_item("duration_nanos", delta.duration_nanos)?;
             dict.set_item("stdout", PyBytes::new(py, &delta.stdout))?;
             dict.set_item("stderr", PyBytes::new(py, &delta.stderr))?;
@@ -565,6 +571,10 @@ fn execute_isolated_action(
             let fs_list = PyList::empty(py);
             for fs_mut in delta.fs_mutations {
                 let fs_dict = PyDict::new(py);
+                fs_dict.set_item(
+                    "is_deferred_execution_hazard",
+                    fs_mut.is_deferred_execution_hazard(),
+                )?;
                 match fs_mut {
                     dry_exec_core::delta::FsMutation::Created { path, mode, size } => {
                         fs_dict.set_item("mutation_type", "created")?;

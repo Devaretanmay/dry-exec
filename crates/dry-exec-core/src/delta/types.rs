@@ -38,6 +38,58 @@ pub enum FsMutation {
     Deleted { path: PathBuf },
 }
 
+impl FsMutation {
+    /// Target path of the filesystem mutation.
+    pub fn path(&self) -> &std::path::Path {
+        match self {
+            Self::Created { path, .. } => path.as_path(),
+            Self::Modified { path, .. } => path.as_path(),
+            Self::Deleted { path } => path.as_path(),
+        }
+    }
+
+    /// Identifies whether the mutation targets persistent execution hooks outside the turn perimeter.
+    ///
+    /// Detects mutations targeting `.git/hooks/*`, shell initialization files (`.bashrc`,
+    /// `.zshrc`, `.profile`), Python site hooks (`*.pth`, `sitecustomize.py`), and virtualenv
+    /// activation scripts that would trigger post-turn execution outside the isolated boundary.
+    pub fn is_deferred_execution_hazard(&self) -> bool {
+        let path = self.path();
+        let path_str = path.to_string_lossy();
+
+        // 1. Git hooks
+        if path_str.contains(".git/hooks/") || path_str.ends_with(".git/hooks") {
+            return true;
+        }
+
+        // 2. Shell initialization scripts and Python site hooks
+        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+            match file_name {
+                ".bashrc" | ".bash_profile" | ".bash_login" | ".profile" | ".zshrc"
+                | ".zprofile" | ".zshenv" | ".zlogin" | ".bash_logout" | ".zlogout" => return true,
+                "sitecustomize.py" | "usercustomize.py" => return true,
+                _ => {}
+            }
+            if file_name.ends_with(".pth") {
+                return true;
+            }
+        }
+
+        // 3. Virtual environment activation hooks
+        if path_str.ends_with("/bin/activate")
+            || path_str.ends_with("/bin/activate.sh")
+            || path_str.ends_with("/bin/activate.csh")
+            || path_str.ends_with("/bin/activate.fish")
+            || path_str.ends_with("/Scripts/activate.bat")
+            || path_str.ends_with("/Scripts/Activate.ps1")
+        {
+            return true;
+        }
+
+        false
+    }
+}
+
 /// Discrete network request intercepted by the transparent proxy boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterceptedRequest {
@@ -76,5 +128,46 @@ pub struct StateDelta {
 impl StateDelta {
     pub fn empty() -> Self {
         Self::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deferred_execution_hazard_detection() {
+        let hook_mutation = FsMutation::Created {
+            path: PathBuf::from(".git/hooks/pre-commit"),
+            mode: 0o755,
+            size: 120,
+        };
+        assert!(hook_mutation.is_deferred_execution_hazard());
+
+        let bashrc_mutation = FsMutation::Modified {
+            path: PathBuf::from("/home/user/.bashrc"),
+            deltas: vec![],
+        };
+        assert!(bashrc_mutation.is_deferred_execution_hazard());
+
+        let pth_mutation = FsMutation::Created {
+            path: PathBuf::from("site-packages/backdoor.pth"),
+            mode: 0o644,
+            size: 64,
+        };
+        assert!(pth_mutation.is_deferred_execution_hazard());
+
+        let activate_mutation = FsMutation::Modified {
+            path: PathBuf::from(".venv/bin/activate"),
+            deltas: vec![],
+        };
+        assert!(activate_mutation.is_deferred_execution_hazard());
+
+        let normal_mutation = FsMutation::Created {
+            path: PathBuf::from("src/main.rs"),
+            mode: 0o644,
+            size: 512,
+        };
+        assert!(!normal_mutation.is_deferred_execution_hazard());
     }
 }
