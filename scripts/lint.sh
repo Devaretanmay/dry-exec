@@ -2,7 +2,7 @@
 set -euo pipefail
 
 echo "==> Running Rust formatting check..."
-cargo fmt --all -- --check || echo "[WARN] cargo fmt failed or rustfmt not installed"
+cargo fmt --all -- --check
 
 echo "==> Running Cargo check..."
 if [ "$(uname)" = "Darwin" ]; then

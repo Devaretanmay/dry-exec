@@ -14,6 +14,9 @@ pub enum IsolationError {
     #[error("Seccomp-BPF syscall interception filter failure: {0}")]
     SeccompFailure(String),
 
+    #[error("Landlock filesystem boundary failure: {0}")]
+    LandlockFailure(String),
+
     #[error("Synchronization channel error: {0}")]
     SyncError(String),
 

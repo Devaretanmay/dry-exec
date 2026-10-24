@@ -21,8 +21,8 @@ To keep engineering precision high and avoid ambiguous abstractions, all code, d
 ### Prerequisites
 - **Operating system**:
   - **macOS**: 11.0+ with Apple Silicon or Intel (runs natively with Seatbelt and APFS).
-  - **Linux**: Kernel 5.x+ with support for namespaces and soft-dirty pagemap (`/proc/[pid]/pagemap`).
-- **Rust toolchain**: 1.80+ (`cargo`, `rustfmt`, and `clippy`).
+  - **Linux**: Landlock ABI 3 or newer, namespaces, and soft-dirty pagemap (`/proc/[pid]/pagemap`).
+- **Rust toolchain**: 1.85+ (`cargo`, `rustfmt`, and `clippy`), as required by the locked dependencies.
 - **Python**: 3.10+ with `venv`, `pip`, and `maturin`.
 - **Docker** (optional): For running the Linux containerized verification matrix across platforms.
 

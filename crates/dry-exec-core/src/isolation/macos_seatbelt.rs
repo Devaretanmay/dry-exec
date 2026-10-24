@@ -20,6 +20,7 @@ pub struct SeatbeltConfig {
     pub allowed_write_paths: Vec<PathBuf>,
     pub allowed_exec_paths: Vec<PathBuf>,
     pub allow_loopback_network: bool,
+    pub loopback_proxy_port: Option<u16>,
     pub allow_process_exec: bool,
 }
 
@@ -47,9 +48,20 @@ impl Default for SeatbeltConfig {
                 PathBuf::from("/Library/Developer"),
             ],
             allow_loopback_network: true,
+            loopback_proxy_port: None,
             allow_process_exec: true,
         }
     }
+}
+
+/// Escape a path as SBPL string content so configuration cannot add profile forms.
+fn escape_sbpl_string(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }
 
 /// Generates a strict, deterministic SBPL (Sandbox Profile Language) scheme.
@@ -67,7 +79,7 @@ pub fn generate_seatbelt_profile(config: &SeatbeltConfig) -> String {
         for path in &config.allowed_exec_paths {
             sbpl.push_str(&format!(
                 "(allow process-exec (subpath \"{}\"))\n",
-                path.display()
+                escape_sbpl_string(&path.to_string_lossy())
             ));
         }
         sbpl.push_str("(allow process-fork)\n");
@@ -92,13 +104,13 @@ pub fn generate_seatbelt_profile(config: &SeatbeltConfig) -> String {
     for path in &config.allowed_read_paths {
         sbpl.push_str(&format!(
             "(allow file-read* (subpath \"{}\"))\n",
-            path.display()
+            escape_sbpl_string(&path.to_string_lossy())
         ));
     }
     for path in &config.allowed_exec_paths {
         sbpl.push_str(&format!(
             "(allow file-read* (subpath \"{}\"))\n",
-            path.display()
+            escape_sbpl_string(&path.to_string_lossy())
         ));
     }
     sbpl.push_str("(allow file-read* (literal \"/bin/echo\"))\n");
@@ -113,26 +125,30 @@ pub fn generate_seatbelt_profile(config: &SeatbeltConfig) -> String {
     for path in &config.allowed_write_paths {
         sbpl.push_str(&format!(
             "(allow file-write* (subpath \"{}\"))\n",
-            path.display()
+            escape_sbpl_string(&path.to_string_lossy())
         ));
         sbpl.push_str(&format!(
             "(allow file-read* (subpath \"{}\"))\n",
-            path.display()
+            escape_sbpl_string(&path.to_string_lossy())
         ));
     }
     sbpl.push('\n');
 
     // Network isolation: only loopback permitted for transparent proxy
-    if config.allow_loopback_network {
+    if let Some(port) = config
+        .loopback_proxy_port
+        .filter(|_| config.allow_loopback_network)
+    {
         sbpl.push_str(";; Loopback network egress confined to transparent mock proxy\n");
-        sbpl.push_str("(allow network-outbound (to ip \"localhost:*\"))\n");
-        sbpl.push_str("(allow network-inbound (local ip \"localhost:*\"))\n");
-        sbpl.push_str("(allow network-bind (local ip \"localhost:*\"))\n\n");
+        sbpl.push_str(&format!(
+            "(allow network-outbound (to ip \"localhost:{port}\"))\n"
+        ));
     }
 
     // Explicit credential protections
     sbpl.push_str(";; Explicit denial of credential and secret locations\n");
     if let Ok(home) = std::env::var("HOME") {
+        let home = escape_sbpl_string(&home);
         sbpl.push_str(&format!("(deny file-read* (subpath \"{home}/.ssh\"))\n"));
         sbpl.push_str(&format!("(deny file-read* (subpath \"{home}/.aws\"))\n"));
         sbpl.push_str(&format!("(deny file-read* (subpath \"{home}/.gnupg\"))\n"));
@@ -177,6 +193,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn configured_paths_cannot_inject_profile_rules() {
+        let config = SeatbeltConfig {
+            allowed_write_paths: vec![PathBuf::from("/tmp/path\"))\n(allow default)\n;")],
+            ..SeatbeltConfig::default()
+        };
+        let profile = generate_seatbelt_profile(&config);
+        assert!(!profile.lines().any(|line| line == "(allow default)"));
+        assert!(profile.contains("path\\\"))\\n(allow default)\\n;"));
+    }
+
+    #[test]
     fn test_seatbelt_profile_syntax_and_denials() {
         let config = SeatbeltConfig::default();
         let profile = generate_seatbelt_profile(&config);
@@ -185,7 +212,21 @@ mod tests {
         assert!(profile.contains("(deny default)"));
         assert!(profile.contains("(allow process-exec (literal \"/bin/echo\"))"));
         assert!(profile.contains("(allow file-write* (subpath \"/private/tmp/dex_ephemeral\"))"));
-        assert!(profile.contains("(allow network-outbound (to ip \"localhost:*\"))"));
+        assert!(!profile.contains("(allow network-outbound"));
         assert!(profile.contains(".ssh"));
+    }
+
+    #[test]
+    fn network_access_is_limited_to_the_registered_proxy_port() {
+        let mut config = SeatbeltConfig {
+            loopback_proxy_port: Some(31415),
+            ..SeatbeltConfig::default()
+        };
+        let profile = generate_seatbelt_profile(&config);
+        assert!(profile.contains("(allow network-outbound (to ip \"localhost:31415\"))"));
+        assert!(!profile.contains("localhost:*"));
+        assert!(!profile.contains("(allow network-bind"));
+        config.allow_loopback_network = false;
+        assert!(!generate_seatbelt_profile(&config).contains("(allow network-outbound"));
     }
 }

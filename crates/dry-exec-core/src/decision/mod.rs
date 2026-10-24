@@ -50,7 +50,7 @@ pub fn evaluate(summary: &DeltaSummary, environment: &Environment) -> DecisionRe
         || network_ratio > Score::MAX
     {
         Choice::Violated
-    } else if summary.schema_breaches > 0 {
+    } else if summary.schema_breaches > 0 || summary.exit_code != 0 {
         Choice::Blocked
     } else {
         Choice::Allowed
@@ -71,6 +71,10 @@ pub fn evaluate(summary: &DeltaSummary, environment: &Environment) -> DecisionRe
         (Choice::Violated, _) => format!(
             "Mutation volume {} bytes exceeds calibrated ceiling {} bytes",
             summary.total_bytes_mutated, environment.max_mutated_bytes
+        ),
+        (Choice::Blocked, _) if summary.exit_code != 0 => format!(
+            "Action exited with status {}; review partial mutations before commit",
+            summary.exit_code
         ),
         (Choice::Blocked, _) => format!(
             "Transparent proxy refused {} route(s) outside the registered schema",
@@ -149,6 +153,19 @@ pub fn evaluate_with_neural(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_commands_never_route_to_auto_commit() {
+        let delta = crate::delta::StateDelta {
+            exit_code: 7,
+            ..Default::default()
+        };
+        let receipt = super::evaluate(
+            &super::DeltaSummary::from(&delta),
+            &super::Environment::default(),
+        );
+        assert_eq!(receipt.choice, super::Choice::Blocked);
+        assert_eq!(receipt.noul_trigger, super::Noul::Escalate);
+    }
     use super::*;
     use crate::delta::{PageMutation, StateDelta};
     use std::cell::Cell;
@@ -373,11 +390,16 @@ mod tests {
         let delta = hundred_megabyte_delta();
         assert_eq!(delta.total_bytes_mutated, 104_857_600);
 
-        let projection_start = Instant::now();
         let summary = DeltaSummary::from(&delta);
-        let projection = projection_start.elapsed();
-
         assert_eq!(summary.memory_pages_mutated, HUNDRED_MEGABYTE_PAGES);
+
+        let iterations = 100u32;
+        let projection_start = Instant::now();
+        for _ in 0..iterations {
+            std::hint::black_box(DeltaSummary::from(std::hint::black_box(&delta)));
+        }
+        let projection = projection_start.elapsed() / iterations;
+
         assert!(
             projection.as_micros() < 100,
             "summary projection {} us exceeded the 100 us (0.1ms) bound",

@@ -435,6 +435,7 @@ dependencies = [
  "dry-exec-core",
  "libc",
  "pyo3",
+ "serde_json",
 ]
 
 [[package]]

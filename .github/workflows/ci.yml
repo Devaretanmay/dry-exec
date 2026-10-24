@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_call:
   push:
     branches: [main]
   pull_request:
@@ -52,7 +53,7 @@ jobs:
       - name: macOS Native Execution Tests
         run: |
           source .venv/bin/activate
-          python -m pytest tests/test_macos_real_execution.py -v
+          python -m pytest tests/ -v
 
   container-verification-matrix:
     name: Containerized Kernel Boundary & Python SDK

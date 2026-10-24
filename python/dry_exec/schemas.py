@@ -1,8 +1,24 @@
 """Type-safe Pydantic V2 schemas governing the pre-execution boundary."""
 
+from enum import Enum
 from typing import Any, Dict, List, Set
 from pydantic import BaseModel, ConfigDict, Field
 from dry_exec.exceptions import SchemaViolationError
+
+
+class SecurityLevel(str, Enum):
+    """Declared isolation strength, ordered from weakest to strongest.
+
+    The current native backends provide PROCESS isolation (Linux namespaces + seccomp, macOS
+    Seatbelt). Stronger levels are declared here so callers can fail closed instead of silently
+    accepting a weaker boundary.
+    """
+
+    NONE = "none"
+    PROCESS = "process"
+    USERNS_LANDLOCK = "userns_landlock"
+    GVISOR = "gvisor"
+    MICROVM = "microvm"
 
 
 class MockResponse(BaseModel):
@@ -81,6 +97,10 @@ class Environment(BaseModel):
     credential_masks: Dict[str, str] = Field(
         default_factory=dict,
         description="Mapping of phantom tokens to real secrets for zero-leakage masking",
+    )
+    minimum_security_level: SecurityLevel = Field(
+        default=SecurityLevel.PROCESS,
+        description="Minimum isolation strength the client must satisfy; stronger unmet levels fail closed",
     )
 
     def validate_action(self, action: Action) -> None:

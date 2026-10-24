@@ -19,6 +19,11 @@ Prompt injection can cause an agent to propose an unintended command, target, or
 
 The boundary limits filesystem and network access, including explicit secret-path denials in the macOS profile. This is not a guarantee that every application-specific secret location is known. Do not mount secret stores into a trial unless required and reviewed.
 
+When a command selects the current Python interpreter, the macOS backend permits execution of
+that interpreter and reads of its virtualenv and base installation. This lets the isolated
+runner load its standard library on hosted runners and local virtualenvs. These installation
+directories are trusted runtime inputs; write access remains limited to the trial directories.
+
 ### Escape vectors
 
 Relevant escape classes include kernel vulnerabilities, namespace configuration errors, Seatbelt profile errors, unsafe native FFI, device access, and dependency compromise. The project reduces exposure with Linux namespaces, seccomp, macOS Seatbelt, isolated filesystem handling, and focused regression tests. Keep host kernels, Python, Rust, and dependencies patched.

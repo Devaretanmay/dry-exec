@@ -11,6 +11,9 @@ pub struct MountConfig {
     pub tmpfs_path: std::path::PathBuf,
     /// Whether to mount a sterile /proc inside the isolated PID namespace.
     pub mount_sterile_proc: bool,
+    /// Host-backed paths that remain writable inside the boundary after the host tree is
+    /// remounted read-only. Used by workspace trials; the caller owns their lifecycle.
+    pub writable_paths: Vec<std::path::PathBuf>,
 }
 
 impl Default for MountConfig {
@@ -18,6 +21,7 @@ impl Default for MountConfig {
         Self {
             tmpfs_path: std::path::PathBuf::from("/tmp/dry_exec_ephemeral"),
             mount_sterile_proc: true,
+            writable_paths: Vec::new(),
         }
     }
 }
@@ -140,6 +144,48 @@ fn remount_readonly(path: &Path) -> Result<(), IsolationError> {
     .map_err(|e| {
         IsolationError::MountFailure(format!(
             "Failed to remount {} read-only: {e}",
+            path.display()
+        ))
+    })
+}
+
+/// Restore write access to a host-backed path after [`restrict_root_readonly`].
+///
+/// A bind mount creates a new mount for the same underlying directory; remounting it without
+/// `MS_RDONLY` makes that view writable while every other host mount stays read-only. Callers
+/// pass only disposable workspace clones, never a durable target tree.
+pub fn bind_mount_writable(path: &Path) -> Result<(), IsolationError> {
+    if !path.exists() {
+        return Err(IsolationError::MountFailure(format!(
+            "Writable workspace path does not exist: {}",
+            path.display()
+        )));
+    }
+
+    mount(
+        Some(path),
+        path,
+        None::<&str>,
+        MsFlags::MS_BIND,
+        None::<&str>,
+    )
+    .map_err(|e| {
+        IsolationError::MountFailure(format!(
+            "Failed to bind writable workspace {}: {e}",
+            path.display()
+        ))
+    })?;
+
+    mount(
+        None::<&str>,
+        path,
+        None::<&str>,
+        MsFlags::MS_REMOUNT | MsFlags::MS_BIND,
+        None::<&str>,
+    )
+    .map_err(|e| {
+        IsolationError::MountFailure(format!(
+            "Failed to remount writable workspace {}: {e}",
             path.display()
         ))
     })
