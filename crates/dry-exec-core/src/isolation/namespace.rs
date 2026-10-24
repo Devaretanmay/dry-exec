@@ -79,6 +79,10 @@ bitflags! {
 
         /// Isolate hostname and domain name identifiers.
         const UTS = libc::CLONE_NEWUTS as u32;
+
+        /// Isolate user and group identifiers, granting namespace-local capabilities without
+        /// requiring host `CAP_SYS_ADMIN`.
+        const USER = libc::CLONE_NEWUSER as u32;
     }
 }
 
@@ -107,6 +111,9 @@ impl NamespaceFlags {
         if self.contains(Self::UTS) {
             flags |= CloneFlags::CLONE_NEWUTS;
         }
+        if self.contains(Self::USER) {
+            flags |= CloneFlags::CLONE_NEWUSER;
+        }
         flags
     }
 
@@ -119,4 +126,27 @@ impl NamespaceFlags {
             ))
         })
     }
+}
+
+/// Probe whether this kernel and security boundary permit creating an unprivileged user namespace.
+///
+/// The probe forks so the calling process never enters the namespace. The child performs only
+/// `unshare(2)` and `_exit(2)`, both async-signal-safe after `fork`.
+pub fn user_namespace_supported() -> bool {
+    static SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SUPPORTED.get_or_init(|| unsafe {
+        let pid = libc::fork();
+        if pid < 0 {
+            return false;
+        }
+        if pid == 0 {
+            let rc = libc::unshare(libc::CLONE_NEWUSER);
+            libc::_exit(if rc == 0 { 0 } else { 1 });
+        }
+        let mut status = 0;
+        if libc::waitpid(pid, &mut status, 0) < 0 {
+            return false;
+        }
+        libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+    })
 }

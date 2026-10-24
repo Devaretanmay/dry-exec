@@ -1,12 +1,14 @@
 """dry-exec: Ephemeral execution primitive for deterministic state exploration."""
 
 import asyncio
+import ast
 import concurrent.futures
 import functools
 import inspect
 import os
 import textwrap
 import tempfile
+import sys
 import uuid
 from typing import Callable, Optional, Set, Union
 
@@ -40,7 +42,7 @@ from dry_exec.models import (
     PageMutation,
     StateDelta,
 )
-from dry_exec.schemas import Action, Environment, MockResponse
+from dry_exec.schemas import Action, Environment, MockResponse, SecurityLevel
 
 
 def _exec_coro_safely(coro):
@@ -60,10 +62,18 @@ def _exec_coro_safely(coro):
 def _callable_command(fn: Callable, args, kwargs):
     """Create a short-lived Python worker script for isolated execution."""
     source = textwrap.dedent(inspect.getsource(fn))
-    source = "\n".join(
-        line for line in source.splitlines() if not line.lstrip().startswith("@")
+    module = ast.parse(source)
+    definition = next(
+        node
+        for node in module.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     )
-    script = f"{source}\n\n{fn.__name__}(*{args!r}, **{kwargs!r})\n"
+    definition.decorator_list = []
+    source = ast.unparse(definition)
+    invocation = f"{fn.__name__}(*{args!r}, **{kwargs!r})"
+    if inspect.iscoroutinefunction(fn):
+        invocation = f"asyncio.run({invocation})"
+    script = f"import asyncio\n{source}\n\n{invocation}\n"
     handle = tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", prefix="dry_exec_callable_", delete=False
     )
@@ -72,7 +82,48 @@ def _callable_command(fn: Callable, args, kwargs):
         path = handle.name
     finally:
         handle.close()
-    return ["python", path], path
+    return [sys.executable, path], path
+
+
+async def _execute_with_workspace(
+    client: "DryExecClient",
+    environment: Environment,
+    action: Action,
+    workspace_dir: Optional[str],
+    commit: bool,
+) -> StateDelta:
+    """Execute against a workspace trial and apply the captured delta exactly once.
+
+    A commit requires an explicit workspace target. The action never re-executes on the host;
+    only the captured filesystem delta is applied through Trial's transactional journal.
+    """
+    if not commit and workspace_dir is None:
+        delta = await client.execute_ephemeral_action(environment, action)
+        enforce_escalation(delta.decision, force=commit)
+        return delta
+
+    if workspace_dir is None:
+        raise ValueError(
+            "commit=True requires an explicit workspace_dir; refusing to apply mutations "
+            "to the process working directory."
+        )
+
+    trial = await client.run_trial(
+        environment,
+        action,
+        workspace_dir=workspace_dir,
+    )
+    try:
+        enforce_escalation(trial.decision, force=commit)
+        if commit:
+            await trial.commit(force=commit)
+        else:
+            await trial.rollback()
+    except BaseException:
+        if not trial.is_committed and not trial.is_rolled_back:
+            await trial.rollback()
+        raise
+    return trial.delta
 
 
 def dry_run(
@@ -82,6 +133,7 @@ def dry_run(
     allowed_targets: Optional[Set[str]] = None,
     memory_limit_bytes: int = 64 * 1024 * 1024,
     commit: bool = False,
+    workspace_dir: Optional[str] = None,
     client: Optional[DryExecClient] = None,
 ):
     """Decorator wrapping function execution within an ephemeral kernel isolation boundary.
@@ -115,13 +167,13 @@ def dry_run(
                     },
                 )
                 try:
-                    delta = await exec_client.execute_ephemeral_action(
-                        target_env, action
+                    return await _execute_with_workspace(
+                        exec_client,
+                        target_env,
+                        action,
+                        workspace_dir,
+                        commit,
                     )
-                    enforce_escalation(delta.decision, force=commit)
-                    if commit:
-                        await fn(*args, **kwargs)
-                    return delta
                 finally:
                     try:
                         os.unlink(script_path)
@@ -145,13 +197,15 @@ def dry_run(
                     },
                 )
                 try:
-                    delta = _exec_coro_safely(
-                        exec_client.execute_ephemeral_action(target_env, action)
+                    return _exec_coro_safely(
+                        _execute_with_workspace(
+                            exec_client,
+                            target_env,
+                            action,
+                            workspace_dir,
+                            commit,
+                        )
                     )
-                    enforce_escalation(delta.decision, force=commit)
-                    if commit:
-                        fn(*args, **kwargs)
-                    return delta
                 finally:
                     try:
                         os.unlink(script_path)
@@ -170,6 +224,7 @@ def run(
     *args,
     environment: Optional[Environment] = None,
     commit: bool = False,
+    workspace_dir: Optional[str] = None,
     client: Optional[DryExecClient] = None,
     **kwargs,
 ) -> StateDelta:
@@ -187,19 +242,22 @@ def run(
             mutation_type="execute",
             payload={"command": target},
         )
-        delta = _exec_coro_safely(
-            exec_client.execute_ephemeral_action(target_env, action)
+        return _exec_coro_safely(
+            _execute_with_workspace(
+                exec_client,
+                target_env,
+                action,
+                workspace_dir,
+                commit,
+            )
         )
-        # System-One escalation gate: escalation clears only through an explicit commit
-        enforce_escalation(delta.decision, force=commit)
-        if commit:
-            import subprocess
-
-            subprocess.run(target, shell=True, check=True)
-        return delta
     elif callable(target):
         wrapper = dry_run(
-            target, environment=environment, commit=commit, client=exec_client
+            target,
+            environment=environment,
+            commit=commit,
+            workspace_dir=workspace_dir,
+            client=exec_client,
         )
         return wrapper(*args, **kwargs)
     else:
@@ -220,6 +278,7 @@ __all__ = [
     "sandboxed_mcp_call",
     "SandboxedToolResult",
     "Environment",
+    "SecurityLevel",
     "Action",
     "MockResponse",
     "StateDelta",

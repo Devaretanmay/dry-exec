@@ -12,7 +12,16 @@ permissions:
   id-token: write
 
 jobs:
+  verify:
+    name: Verify release candidate
+    uses: ./.github/workflows/ci.yml
+
+  lint:
+    name: Check release formatting and lint
+    uses: ./.github/workflows/lint.yml
+
   build-wheels:
+    needs: [verify, lint]
     name: Build ${{ matrix.platform }} Wheels
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -98,7 +107,7 @@ jobs:
 
   publish-cargo:
     name: Publish Crates to Crates.io
-    needs: [publish-gate]
+    needs: [verify, lint, build-wheels, publish-gate]
     runs-on: ubuntu-latest
     if: needs.publish-gate.outputs.cargo == 'true'
     steps:

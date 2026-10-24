@@ -2,6 +2,9 @@
 name = "dry-exec-core"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/Devaretanmay/dry-exec"
 authors = ["dry-exec systems engineering"]
 description = "Deterministic ephemeral execution primitive and state delta engine"
 

@@ -8,7 +8,7 @@ Explore state mutations without consequences. Commit only what you approve.
 
 [![PyPI](https://img.shields.io/pypi/v/dry-exec.svg)](https://pypi.org/project/dry-exec/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-1.80+-orange.svg)](https://www.rust-lang.org/)
+[![Rust](https://img.shields.io/badge/Rust-1.85+-orange.svg)](https://www.rust-lang.org/)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-green.svg)](#architecture-dual-backend-engine)
 [![CI](https://github.com/Devaretanmay/dry-exec/actions/workflows/ci.yml/badge.svg)](https://github.com/Devaretanmay/dry-exec/actions/workflows/ci.yml)
@@ -73,7 +73,10 @@ import asyncio
 from dry_exec import Agent
 
 async def main():
-    agent = Agent(task="Clean up old temp files and migrate user records")
+    agent = Agent(
+        task="Clean up old temp files and migrate user records",
+        workspace_dir="./my_project",
+    )
     result = await agent.run()
 
     print(f"Success: {result.success}, Trials: {result.trials_conducted}, Committed: {result.committed}")
@@ -81,7 +84,7 @@ async def main():
 asyncio.run(main())
 ```
 
-`result.committed` reflects the decision layer's routing: `True` means the delta was cleared for auto-commit, not that the Agent replayed mutations to durable storage. Durable commit remains the caller's responsibility.
+`result.committed` is `True` only when the Agent was constructed with `workspace_dir="..."` and the captured delta was actually applied to that workspace. Without a workspace the loop is a dry run, so `committed` stays `False` even when the decision routes to auto-commit.
 
 <br>
 
@@ -110,7 +113,7 @@ async def main():
 asyncio.run(main())
 ```
 
-Commands execute with their working directory set to the ephemeral root. Absolute paths outside that root are read-only inside the Linux mount namespace.
+Commands execute with their working directory set to the ephemeral root. Absolute paths outside that root are read-only inside the Linux mount namespace, and a Landlock write boundary (ABI 3 or newer) denies writes outside the ephemeral root and workspace even if the child remounts the host tree writable inside its namespace. Older Landlock ABIs lack file-truncation containment and are rejected.
 
 <br>
 
@@ -139,11 +142,21 @@ Or execute arbitrary commands directly via functional `dry_exec.run()`:
 delta = dry_exec.run("python seed_data.py")
 ```
 
+To apply the captured filesystem delta to a durable target, pass an explicit workspace. The
+callable or command is never replayed on the host:
+
+```python
+delta = dry_exec.run("python seed_data.py", commit=True, workspace_dir="./my_project")
+```
+
+`commit=True` without `workspace_dir` raises `ValueError` rather than defaulting to the process
+working directory.
+
 <br>
 
 ### 4. Atomic Trials: commit or rollback
 
-Test modifications against a target workspace directory. If approved, mutations are applied atomically via temporary file replacement; otherwise, the scratch workspace is discarded with zero host mutations:
+Test modifications against a target workspace directory. If approved, each file is replaced atomically and an in-process journal restores prior contents if application fails. A multi-file commit is not a crash-safe filesystem transaction. Keep the workspace free of concurrent writers during commit. Otherwise, the scratch workspace is discarded:
 
 ```python
 import asyncio
@@ -170,7 +183,28 @@ asyncio.run(main())
 
 <br>
 
-### 5. Sandboxed MCP tools (Model Context Protocol)
+### 5. Declared isolation strength
+
+`Environment.minimum_security_level` defaults to `SecurityLevel.PROCESS` (Linux namespaces +
+seccomp, macOS Seatbelt). Requesting a stronger level than the current backend provides fails
+closed with `IsolationSetupError`; it never silently degrades.
+
+```python
+from dry_exec import Environment, SecurityLevel
+
+env = Environment(minimum_security_level=SecurityLevel.USERNS_LANDLOCK)
+# Raises IsolationSetupError: this backend provides only process isolation.
+```
+
+On macOS, network access is limited to the registered loopback proxy port. Without a proxy,
+the action receives no network allowance. Other local services remain outside the boundary.
+
+Network routes registered with an absolute URL also establish a host allowlist. `CONNECT` and
+plain HTTP requests to any other host are refused with `403` and counted as schema breaches.
+
+<br>
+
+### 6. Sandboxed MCP tools (Model Context Protocol)
 
 Execute Model Context Protocol tools and agent tool functions inside kernel-level isolation with zero external runtime dependencies:
 
@@ -206,7 +240,8 @@ asyncio.run(main())
 ─────────────────────────                             ─────────────────────────
 • Linux Namespaces (PID, NET, MNT)                    • Apple Seatbelt (sandbox_init)
 • Read-only host remount + sterile /proc              • APFS Copy-on-Write (clonefile)
-• seccomp-BPF TRAP filter                             • Transparent Loopback Proxy
+• Landlock write containment                          • Transparent Loopback Proxy
+• seccomp-BPF TRAP filter
 • /proc/[pid]/pagemap soft-dirty
 • Zero Docker needed                                  • Zero Docker needed
 ```
@@ -221,7 +256,7 @@ asyncio.run(main())
                  ▼
   Rust Control Plane (Linux & macOS Router)
   ┌──────────────────────────────────────────────┐
-  │  Linux: Namespaces + seccomp + pagemap       │
+  │  Linux: Namespaces + Landlock + seccomp      │
   │  macOS: Seatbelt MAC + APFS CoW clone        │
   │  Transparent proxy for mock endpoints        │
   │  System-One Decision Layer (O(1) in delta)   │

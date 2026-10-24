@@ -12,6 +12,6 @@ if ! command -v maturin >/dev/null 2>&1; then
   "${python_bin}" -m pip install maturin
 fi
 
-maturin build --release --interpreter "${python_bin}" --out "${output_dir}"
+maturin build --release --locked --interpreter "${python_bin}" --out "${output_dir}" "$@"
 test -n "$(find "${output_dir}" -maxdepth 1 -name '*.whl' -print -quit)"
 echo "wheel-build-ok"
