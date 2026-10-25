@@ -229,6 +229,16 @@ fn execute_isolated_action(
                     roots.push(path);
                 }
             }
+            if let Ok(base_exec) = sys.getattr("_base_executable") {
+                if let Ok(path) = base_exec.extract::<String>() {
+                    let path = std::fs::canonicalize(&path).unwrap_or_else(|_| PathBuf::from(path));
+                    if let Some(parent) = path.parent() {
+                        if !roots.contains(&parent.to_path_buf()) {
+                            roots.push(parent.to_path_buf());
+                        }
+                    }
+                }
+            }
             Some((executable, roots))
         } else {
             None
@@ -559,6 +569,7 @@ fn execute_isolated_action(
         };
         if let Some((executable, roots)) = &python_runtime {
             seatbelt_config.allowed_exec_paths.push(executable.clone());
+            seatbelt_config.allowed_exec_paths.extend(roots.iter().cloned());
             seatbelt_config.allowed_read_paths.extend(roots.iter().cloned());
         }
 

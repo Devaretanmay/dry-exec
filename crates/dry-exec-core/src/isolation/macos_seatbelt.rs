@@ -46,6 +46,7 @@ impl Default for SeatbeltConfig {
                 PathBuf::from("/usr/local/bin"),
                 PathBuf::from("/opt/homebrew"),
                 PathBuf::from("/Library/Developer"),
+                PathBuf::from("/Library/Frameworks"),
             ],
             allow_loopback_network: true,
             loopback_proxy_port: None,
