@@ -265,16 +265,19 @@ async def test_credential_phantom_token_masking():
 
 @pytest.mark.asyncio
 async def test_sandboxed_mcp_tool_decorator_and_call():
-    """Verify sandboxed_mcp_tool decorator and sandboxed_mcp_call execution."""
+    """A mocked boundary must never cause tool code to execute on the host."""
     client = DryExecClient(ffi_module=MockFFI())
+    calls = []
 
     @sandboxed_mcp_tool(client=client, auto_commit=True)
     async def add_numbers(a: int, b: int) -> int:
+        calls.append((a, b))
         return a + b
 
     result: SandboxedToolResult = await add_numbers(10, 32)
-    assert result.result == 42
-    assert result.committed is True
+    assert result.result is None
+    assert result.committed is False
+    assert calls == []
     assert result.delta.decision.choice == Choice.ALLOWED
 
     # Direct functional call test
@@ -284,7 +287,7 @@ async def test_sandboxed_mcp_tool_decorator_and_call():
     res = await sandboxed_mcp_call(
         sample_tool, "PostHog", client=client, auto_commit=False
     )
-    assert res.result == "Hello, PostHog"
+    assert res.result is None
     assert res.committed is False
 
 
@@ -332,3 +335,240 @@ async def test_reproduce_mcp_tool_mutation_contained_in_scratch():
         assert res.committed is False
         assert not ws_file.exists()
         assert not Path("leaked.txt").exists()
+
+
+def test_trial_source_resolution_rejects_escape_paths(tmp_path):
+    """Only relative in-scratch paths may be applied to the durable workspace."""
+    scratch = (tmp_path / "scratch").resolve()
+    scratch.mkdir()
+
+    assert Trial._relative_source("/etc/passwd", scratch) is None
+    assert Trial._relative_source("../escape.txt", scratch) is None
+    assert Trial._relative_source("nested/file.txt", scratch) == Path("nested/file.txt")
+
+
+@pytest.mark.asyncio
+async def test_clone_workspace_re_raises_overlap_error(tmp_path):
+    """Destination overlapping source tree must fail closed rather than falling back to copytree."""
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "file.txt").write_text("data")
+    destination = source / "nested"
+
+    client = DryExecClient()
+    with pytest.raises(Exception, match="overlaps the source tree"):
+        await client._clone_workspace(str(source), str(destination))
+
+
+@pytest.mark.asyncio
+async def test_trial_missing_source_preserves_existing_target(tmp_path):
+    """A stale delta entry must not delete a target when its scratch source vanished."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "state.txt"
+    target.write_text("original")
+
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+
+    delta = _mock_delta(
+        mutations=[
+            FsMutation(mutation_type="modified", path="state.txt"),
+        ]
+    )
+    trial = Trial(
+        delta=delta,
+        environment=Environment(),
+        action=Action(
+            action_id="stale_source",
+            target_resource="state.txt",
+            mutation_type="modify",
+        ),
+        scratch_dir=str(scratch),
+        workspace_dir=str(workspace),
+    )
+
+    await trial.commit()
+    assert target.read_text() == "original"
+
+
+@pytest.mark.asyncio
+async def test_trial_commit_rejects_symlink_escape_and_rolls_back(tmp_path):
+    """A workspace symlink must not let a commit write outside the target tree."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (workspace / "link").symlink_to(outside, target_is_directory=True)
+
+    applied = workspace / "a.txt"
+    applied.write_text("original")
+
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "a.txt").write_text("changed")
+    (scratch / "link").mkdir()
+    (scratch / "link" / "leak.txt").write_text("escaped")
+
+    delta = _mock_delta(
+        mutations=[
+            FsMutation(mutation_type="modified", path="a.txt"),
+            FsMutation(mutation_type="created", path="link/leak.txt"),
+        ]
+    )
+    trial = Trial(
+        delta=delta,
+        environment=Environment(),
+        action=Action(
+            action_id="symlink_escape",
+            target_resource="a.txt",
+            mutation_type="modify",
+        ),
+        scratch_dir=str(scratch),
+        workspace_dir=str(workspace),
+    )
+
+    with pytest.raises(RuntimeError, match="outside workspace"):
+        await trial.commit()
+
+    assert not trial.is_committed
+    assert applied.read_text() == "original"
+    assert not (outside / "leak.txt").exists()
+
+
+def test_ffi_rejects_invalid_action_without_touching_boundary():
+    """Direct FFI callers must hit the native schema gate before execution."""
+    from dry_exec.client import _dry_exec_ffi
+
+    if _dry_exec_ffi is None:
+        pytest.skip("Native FFI primitive is not loaded")
+
+    with pytest.raises(_dry_exec_ffi.SchemaViolationError, match="action_id"):
+        _dry_exec_ffi.execute_isolated_action(
+            '{"action_id": ""}',
+            1024,
+            "/tmp/dry_exec_invalid",
+            False,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+    with pytest.raises(_dry_exec_ffi.SchemaViolationError) as exc:
+        _dry_exec_ffi.execute_isolated_action(
+            '{"action_id":"a","target_resource":"forbidden","mutation_type":"m","payload":{}}',
+            1024,
+            "/tmp/dry_exec_invalid",
+            False,
+            None,
+            None,
+            None,
+            None,
+            ["allowed"],
+            None,
+        )
+    assert exc.value.invalid_target == "forbidden"
+
+
+def test_security_level_fails_closed_before_ffi():
+    """An unmet isolation strength must refuse execution instead of silently degrading."""
+    from dry_exec import IsolationSetupError, SecurityLevel
+
+    client = DryExecClient(ffi_module=MockFFI())
+    environment = Environment(minimum_security_level=SecurityLevel.MICROVM)
+    action = Action(
+        action_id="security_level",
+        target_resource="db",
+        mutation_type="execute",
+    )
+
+    with pytest.raises(IsolationSetupError, match="provides only"):
+        asyncio_run(client.execute_ephemeral_action(environment, action))
+
+
+def asyncio_run(coro):
+    import asyncio
+
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+def test_commit_applies_captured_delta_without_host_reexecution(monkeypatch, tmp_path):
+    """The commit path must use the captured delta, never replay the callable on the host."""
+    import dry_exec
+
+    executions = []
+
+    def target() -> dict:
+        executions.append("host")
+        return {"ok": True}
+
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    async def mock_run_trial(self, environment, action, workspace_dir=None, **kwargs):
+        return Trial(
+            delta=_mock_delta(),
+            environment=environment,
+            action=action,
+            scratch_dir=str(scratch),
+            workspace_dir=str(workspace_dir),
+        )
+
+    async def boom(*args, **kwargs):
+        raise AssertionError("host re-execution must not occur")
+
+    monkeypatch.setattr(DryExecClient, "run_trial", mock_run_trial)
+    monkeypatch.setattr(DryExecClient, "execute_ephemeral_action", boom)
+
+    dry_exec.run(target, commit=True, workspace_dir=str(workspace))
+
+    assert executions == []
+
+
+@pytest.mark.asyncio
+async def test_trial_commit_preserves_created_symlink(tmp_path):
+    """A symlink created in scratch is applied as a link, not followed and copied."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "link").symlink_to("/etc/passwd")
+
+    trial = Trial(
+        delta=_mock_delta(mutations=[FsMutation(mutation_type="created", path="link")]),
+        environment=Environment(),
+        action=Action(
+            action_id="symlink_create",
+            target_resource="link",
+            mutation_type="create",
+        ),
+        scratch_dir=str(scratch),
+        workspace_dir=str(workspace),
+    )
+
+    await trial.commit()
+
+    applied = workspace / "link"
+    assert applied.is_symlink()
+    assert applied.readlink() == Path("/etc/passwd")
+
+
+@pytest.mark.asyncio
+async def test_run_trial_rejects_missing_workspace(tmp_path):
+    """An explicit workspace must exist; silently running elsewhere hides caller mistakes."""
+    client = DryExecClient(ffi_module=MockFFI())
+    action = Action(
+        action_id="missing_workspace",
+        target_resource="fs",
+        mutation_type="execute",
+    )
+
+    with pytest.raises(FileNotFoundError, match="workspace_dir"):
+        await client.run_trial(
+            Environment(), action, workspace_dir=str(tmp_path / "missing")
+        )

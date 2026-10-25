@@ -2,7 +2,7 @@
 
 use crate::delta::types::InterceptedRequest;
 use crate::error::DeltaError;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -32,12 +32,14 @@ impl Default for MockResponse {
 #[derive(Debug, Clone, Default)]
 pub struct NetworkMockSchema {
     endpoints: HashMap<(String, String), MockResponse>,
+    allowed_hosts: HashSet<String>,
 }
 
 impl NetworkMockSchema {
     pub fn new() -> Self {
         Self {
             endpoints: HashMap::new(),
+            allowed_hosts: HashSet::new(),
         }
     }
 
@@ -48,8 +50,19 @@ impl NetworkMockSchema {
         path: impl Into<String>,
         response: MockResponse,
     ) {
+        let path = path.into();
+        if let Some(host) = absolute_url_host(&path) {
+            self.allowed_hosts.insert(host);
+        }
         self.endpoints
-            .insert((method.into().to_uppercase(), path.into()), response);
+            .insert((method.into().to_uppercase(), path), response);
+    }
+
+    /// Hosts admitted by routes registered with an absolute URL. Relative routes carry no host,
+    /// so their callers are responsible for supplying a host-bearing route when they need an
+    /// explicit domain allowlist.
+    pub fn allows_host(&self, host: &str) -> bool {
+        self.allowed_hosts.is_empty() || self.allowed_hosts.contains(&normalize_host(host))
     }
 
     /// Look up schema response for the given method and path.
@@ -57,6 +70,26 @@ impl NetworkMockSchema {
         self.endpoints
             .get(&(method.to_uppercase(), path.to_string()))
     }
+}
+
+fn normalize_host(host: &str) -> String {
+    let host = host.trim().trim_end_matches('.');
+    let host = if let Some(end) = host.find(']') {
+        &host[..=end]
+    } else {
+        host.split(':').next().unwrap_or(host)
+    };
+    host.to_ascii_lowercase()
+}
+
+/// Extract the authority from an absolute `http(s)://` route, ignoring any userinfo or port.
+fn absolute_url_host(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let authority = rest.split('/').next()?.rsplit('@').next()?;
+    let host = normalize_host(authority);
+    (!host.is_empty()).then_some(host)
 }
 
 /// Deterministic network boundary: a reserved loopback port plus the schema-driven route table.
@@ -81,7 +114,9 @@ pub struct TransparentProxy {
     is_running: Arc<AtomicBool>,
     intercepted: Arc<Mutex<Vec<InterceptedRequest>>>,
     schema_breaches: Arc<AtomicUsize>,
+    active_connections: Arc<AtomicUsize>,
     server_thread: Option<JoinHandle<()>>,
+    workers: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 impl TransparentProxy {
@@ -110,6 +145,10 @@ impl TransparentProxy {
         let intercepted_clone = intercepted.clone();
         let schema_breaches = Arc::new(AtomicUsize::new(0));
         let schema_breaches_clone = schema_breaches.clone();
+        let active_connections = Arc::new(AtomicUsize::new(0));
+        let active_connections_clone = active_connections.clone();
+        let workers: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+        let workers_clone = workers.clone();
 
         // Poll the listener so the serving thread observes shutdown without depending on a
         // wake-up connection, which cannot reach a listener bound in another network namespace.
@@ -118,17 +157,27 @@ impl TransparentProxy {
             .map_err(DeltaError::IoError)?;
 
         let server_thread = thread::spawn(move || {
-            // Set socket timeout for connection operations to bound execution latency
             while running_clone.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _)) => {
                         let _ = stream.set_nonblocking(false);
-                        handle_connection(
-                            stream,
-                            &schema,
-                            &intercepted_clone,
-                            &schema_breaches_clone,
-                        );
+                        if active_connections_clone.fetch_add(1, Ordering::AcqRel)
+                            >= MAX_CONCURRENT_CONNECTIONS
+                        {
+                            active_connections_clone.fetch_sub(1, Ordering::AcqRel);
+                            continue;
+                        }
+                        let schema = schema.clone();
+                        let intercepted = intercepted_clone.clone();
+                        let breaches = schema_breaches_clone.clone();
+                        let active = active_connections_clone.clone();
+                        let handle = thread::spawn(move || {
+                            handle_connection(stream, &schema, &intercepted, &breaches);
+                            active.fetch_sub(1, Ordering::AcqRel);
+                        });
+                        let mut guard = workers_clone.lock().unwrap();
+                        guard.retain(|worker| !worker.is_finished());
+                        guard.push(handle);
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(2));
@@ -145,7 +194,9 @@ impl TransparentProxy {
             is_running,
             intercepted,
             schema_breaches,
+            active_connections,
             server_thread: Some(server_thread),
+            workers,
         })
     }
 
@@ -169,6 +220,11 @@ impl TransparentProxy {
     pub fn schema_breaches(&self) -> usize {
         self.schema_breaches.load(Ordering::Relaxed)
     }
+
+    /// Number of connections currently being served.
+    pub fn active_connections(&self) -> usize {
+        self.active_connections.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for TransparentProxy {
@@ -177,11 +233,17 @@ impl Drop for TransparentProxy {
         if let Some(handle) = self.server_thread.take() {
             let _ = handle.join();
         }
+        for worker in self.workers.lock().unwrap().drain(..) {
+            let _ = worker.join();
+        }
     }
 }
 
 /// Bounded request buffer: a single intercepted request never exceeds this ceiling.
 const REQUEST_BUFFER_BYTES: usize = 16 * 1024;
+
+/// Upper bound on simultaneously served proxy connections.
+const MAX_CONCURRENT_CONNECTIONS: usize = 32;
 
 /// Offset of the request head terminator, marking the start of the body.
 fn find_head_end(buf: &[u8]) -> Option<usize> {
@@ -256,6 +318,7 @@ fn mock_response_bytes(
         200 => "OK",
         201 => "Created",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
         _ => "Status",
     };
@@ -269,13 +332,18 @@ fn mock_response_bytes(
 }
 
 fn handle_tls_connection(
-    stream: TcpStream,
+    mut stream: TcpStream,
     target: &str,
     schema: &NetworkMockSchema,
     intercepted: &Arc<Mutex<Vec<InterceptedRequest>>>,
     schema_breaches: &Arc<AtomicUsize>,
 ) {
-    let host = target.trim_end_matches(":443");
+    let host = normalize_host(target);
+    if !schema.allows_host(&host) {
+        schema_breaches.fetch_add(1, Ordering::Relaxed);
+        let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+        return;
+    }
     let certificate = match rcgen::generate_simple_self_signed(vec![host.to_string()]) {
         Ok(certificate) => certificate,
         Err(_) => return,
@@ -343,19 +411,19 @@ fn handle_tls_connection(
             )
         }
     };
-    let _ = tls.write_all(&mock_response_bytes(
-        status_code,
-        &response_headers,
-        &response_body,
-    ));
     intercepted.lock().unwrap().push(InterceptedRequest {
         method,
         url,
         headers,
         request_body,
         response_status: status_code,
-        response_body,
+        response_body: response_body.clone(),
     });
+    let _ = tls.write_all(&mock_response_bytes(
+        status_code,
+        &response_headers,
+        &response_body,
+    ));
 }
 
 /// Parse HTTP request, enforce schema boundaries, and return deterministic response.
@@ -392,6 +460,20 @@ fn handle_connection(
     let url = parts[1].to_string();
 
     if method == "CONNECT" {
+        let host = normalize_host(&url);
+        if !schema.allows_host(&host) {
+            schema_breaches.fetch_add(1, Ordering::Relaxed);
+            intercepted.lock().unwrap().push(InterceptedRequest {
+                method,
+                url,
+                headers: HashMap::new(),
+                request_body: Vec::new(),
+                response_status: 403,
+                response_body: Vec::new(),
+            });
+            let _ = stream.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+            return;
+        }
         let _ = stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n");
         handle_tls_connection(stream, &url, schema, intercepted, schema_breaches);
         return;
@@ -404,6 +486,30 @@ fn handle_connection(
         }
         if let Some((k, v)) = line.split_once(':') {
             headers.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+
+    if !schema.allowed_hosts.is_empty() {
+        if let Some((_, host)) = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+        {
+            if !schema.allows_host(host) {
+                schema_breaches.fetch_add(1, Ordering::Relaxed);
+                let mut h = HashMap::new();
+                h.insert("Content-Type".to_string(), "application/json".to_string());
+                let body = b"{\"error\":\"Schema boundary breach: host not allowed\"}".to_vec();
+                intercepted.lock().unwrap().push(InterceptedRequest {
+                    method,
+                    url,
+                    headers,
+                    request_body: Vec::new(),
+                    response_status: 403,
+                    response_body: body.clone(),
+                });
+                let _ = stream.write_all(&mock_response_bytes(403, &h, &body));
+                return;
+            }
         }
     }
 
@@ -431,22 +537,21 @@ fn handle_connection(
         }
     };
 
-    let _ = stream.write_all(&mock_response_bytes(
-        status_code,
-        &response_headers,
-        &response_body,
-    ));
-
-    // Record network mutation into state delta ledger
-    let mut guard = intercepted.lock().unwrap();
-    guard.push(InterceptedRequest {
+    // Record before writing so a client that drains immediately after observing the response
+    // cannot race the ledger update.
+    intercepted.lock().unwrap().push(InterceptedRequest {
         method,
         url,
         headers,
         request_body,
         response_status: status_code,
-        response_body,
+        response_body: response_body.clone(),
     });
+    let _ = stream.write_all(&mock_response_bytes(
+        status_code,
+        &response_headers,
+        &response_body,
+    ));
 }
 
 #[cfg(test)]
@@ -469,6 +574,88 @@ mod tests {
         let mut stream = TcpStream::connect(("127.0.0.1", proxy.port())).unwrap();
         stream
             .write_all(b"CONNECT httpbin.org:443 HTTP/1.1\r\nHost: httpbin.org\r\n\r\n")
+            .unwrap();
+        let mut response = [0u8; 64];
+        let count = stream.read(&mut response).unwrap();
+        assert!(String::from_utf8_lossy(&response[..count]).contains("200 Connection Established"));
+    }
+    #[test]
+    fn slow_connection_does_not_block_other_clients() {
+        let mut schema = NetworkMockSchema::new();
+        schema.register_endpoint("GET", "/fast", MockResponse::default());
+        let proxy = TransparentProxy::start(schema).unwrap();
+        let addr = ("127.0.0.1", proxy.port());
+
+        // Hold a partial request open. A serialized server would stay blocked in read until the
+        // 500ms connection timeout, leaving the second client unanswered.
+        let mut slow = TcpStream::connect(addr).unwrap();
+        slow.write_all(b"GET /slow HTTP/1.1\r\nHost: localhost\r\n")
+            .unwrap();
+        slow.flush().unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_millis(200);
+        while proxy.active_connections() == 0 && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(proxy.active_connections(), 1);
+
+        let mut fast = TcpStream::connect(addr).unwrap();
+        fast.set_read_timeout(Some(Duration::from_millis(200)))
+            .unwrap();
+        fast.write_all(b"GET /fast HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let mut response = [0u8; 32];
+        let read = fast.read(&mut response).unwrap();
+        assert!(read > 0);
+    }
+    #[test]
+    fn connect_rejects_hosts_outside_absolute_route_allowlist() {
+        let mut schema = NetworkMockSchema::new();
+        schema.register_endpoint(
+            "GET",
+            "https://allowed.example/secure",
+            MockResponse::default(),
+        );
+        let proxy = TransparentProxy::start(schema).unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", proxy.port())).unwrap();
+        stream
+            .write_all(b"CONNECT blocked.example:443 HTTP/1.1\r\nHost: blocked.example\r\n\r\n")
+            .unwrap();
+        let mut response = [0u8; 64];
+        let count = stream.read(&mut response).unwrap();
+        assert!(String::from_utf8_lossy(&response[..count]).contains("403 Forbidden"));
+        assert_eq!(proxy.schema_breaches(), 1);
+        let mutations = proxy.drain_intercepted();
+        assert_eq!(mutations.len(), 1);
+        assert_eq!(mutations[0].response_status, 403);
+    }
+    #[test]
+    fn plain_http_rejects_disallowed_host_header() {
+        let mut schema = NetworkMockSchema::new();
+        schema.register_endpoint(
+            "GET",
+            "https://allowed.example/secure",
+            MockResponse::default(),
+        );
+        let proxy = TransparentProxy::start(schema).unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", proxy.port())).unwrap();
+        stream
+            .write_all(b"GET /secure HTTP/1.1\r\nHost: blocked.example\r\n\r\n")
+            .unwrap();
+        let mut response = [0u8; 64];
+        let count = stream.read(&mut response).unwrap();
+        assert!(String::from_utf8_lossy(&response[..count]).contains("403 Forbidden"));
+        assert_eq!(proxy.schema_breaches(), 1);
+    }
+
+    #[test]
+    fn connect_handles_bracketed_ipv6_authority() {
+        let mut schema = NetworkMockSchema::new();
+        schema.register_endpoint("GET", "https://[::1]/status", MockResponse::default());
+        let proxy = TransparentProxy::start(schema).unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", proxy.port())).unwrap();
+        stream
+            .write_all(b"CONNECT [::1]:443 HTTP/1.1\r\nHost: [::1]:443\r\n\r\n")
             .unwrap();
         let mut response = [0u8; 64];
         let count = stream.read(&mut response).unwrap();

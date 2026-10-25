@@ -1,6 +1,8 @@
 //! Ephemeral execution boundary and kernel isolation module.
 
 #[cfg(target_os = "linux")]
+pub mod landlock;
+#[cfg(target_os = "linux")]
 pub mod mount;
 #[cfg(target_os = "linux")]
 pub mod namespace;
@@ -10,12 +12,14 @@ pub mod process;
 pub mod seccomp;
 
 #[cfg(target_os = "linux")]
+pub use landlock::{apply_write_containment, landlock_abi, landlock_supported};
+#[cfg(target_os = "linux")]
 pub use mount::{
     mount_ephemeral_tmpfs, mount_sterile_proc, restrict_root_readonly,
     set_mount_propagation_private, MountConfig,
 };
 #[cfg(target_os = "linux")]
-pub use namespace::{bring_loopback_up, NamespaceFlags};
+pub use namespace::{bring_loopback_up, user_namespace_supported, NamespaceFlags};
 #[cfg(target_os = "linux")]
 pub use process::{
     execute_isolated_process, execute_isolated_process_with_inspection, BoundaryContext,

@@ -14,8 +14,9 @@ pub use decision::{
     evaluate, evaluate_with_neural, Choice, DecisionReceipt, DeltaSummary, Environment, Noul, Score,
 };
 pub use delta::{
-    AnonymousMemoryRegion, ByteDelta, DeltaCoordinator, FsMutation, InterceptedRequest,
-    MockResponse, NetworkBoundary, NetworkMockSchema, PageMutation, StateDelta, TransparentProxy,
+    clone_directory, AnonymousMemoryRegion, ByteDelta, DeltaCoordinator, FsMutation,
+    InterceptedRequest, MockResponse, NetworkBoundary, NetworkMockSchema, PageMutation, StateDelta,
+    TransparentProxy,
 };
 pub use error::{BoundaryExitStatus, DeltaError, IsolationError};
 

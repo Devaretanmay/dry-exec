@@ -4,7 +4,9 @@ use crate::error::IsolationError;
 use crate::isolation::macos_seatbelt::{
     apply_seatbelt_profile, generate_seatbelt_profile, SeatbeltConfig,
 };
+use std::io::{Read, Write};
 use std::os::unix::io::FromRawFd;
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 
 /// Executes an action within a child process locked down by a macOS Seatbelt profile.
@@ -17,6 +19,8 @@ where
     F: FnOnce() -> i32,
 {
     let profile = generate_seatbelt_profile(seatbelt_config);
+    let (mut setup_reader, mut setup_writer) = UnixStream::pair()
+        .map_err(|error| IsolationError::ProcessFailure(format!("setup channel: {error}")))?;
 
     unsafe {
         let pid = libc::fork();
@@ -30,14 +34,16 @@ where
         if pid == 0 {
             // Child: lock down process with irreversible Seatbelt profile
             if let Err(e) = apply_seatbelt_profile(&profile) {
-                eprintln!("[dex-macos] Seatbelt initialization error: {e}");
+                let _ = setup_writer.write_all(e.to_string().as_bytes());
                 libc::_exit(126);
             }
+            drop(setup_writer);
 
             // Execute isolated action within kernel boundary
             let status = action();
             libc::_exit(status);
         } else {
+            drop(setup_writer);
             // Parent supervisor: await child termination
             let mut status = 0;
             let res = libc::waitpid(pid, &mut status, 0);
@@ -46,6 +52,15 @@ where
                     "waitpid() failed: errno {}",
                     std::io::Error::last_os_error()
                 )));
+            }
+            let mut setup_error = String::new();
+            setup_reader
+                .read_to_string(&mut setup_error)
+                .map_err(|error| {
+                    IsolationError::ProcessFailure(format!("setup channel read: {error}"))
+                })?;
+            if !setup_error.is_empty() {
+                return Err(IsolationError::ProcessFailure(setup_error));
             }
 
             if libc::WIFEXITED(status) {
@@ -72,6 +87,8 @@ pub fn execute_macos_command(
         ));
     }
     let profile = generate_seatbelt_profile(seatbelt_config);
+    let (mut setup_reader, mut setup_writer) = UnixStream::pair()
+        .map_err(|error| IsolationError::ProcessFailure(format!("setup channel: {error}")))?;
     let argv: Vec<std::ffi::CString> = command
         .iter()
         .map(|part| {
@@ -124,7 +141,7 @@ pub fn execute_macos_command(
             libc::close(stdout_pipe_fds[1]);
             libc::close(stderr_pipe_fds[1]);
             if let Err(error) = apply_seatbelt_profile(&profile) {
-                eprintln!("sandbox_init failed: {error}");
+                let _ = setup_writer.write_all(error.to_string().as_bytes());
                 libc::_exit(126);
             }
             if libc::chdir(
@@ -133,12 +150,16 @@ pub fn execute_macos_command(
                     .as_ptr(),
             ) != 0
             {
-                eprintln!(
-                    "[dex-macos] sandboxed chdir failed: {}",
-                    std::io::Error::last_os_error()
+                let _ = setup_writer.write_all(
+                    format!(
+                        "sandboxed chdir failed: {}",
+                        std::io::Error::last_os_error()
+                    )
+                    .as_bytes(),
                 );
                 libc::_exit(126);
             }
+            drop(setup_writer);
             if let Some(proxy) = proxy_url {
                 let proxy = std::ffi::CString::new(proxy).unwrap();
                 for key in [
@@ -161,6 +182,7 @@ pub fn execute_macos_command(
             libc::_exit(127);
         }
 
+        drop(setup_writer);
         libc::close(stdout_pipe_fds[1]);
         libc::close(stderr_pipe_fds[1]);
         let stdout_reader = std::thread::spawn(move || {
@@ -184,6 +206,15 @@ pub fn execute_macos_command(
         }
         let stdout = stdout_reader.join().unwrap_or_default();
         let stderr = stderr_reader.join().unwrap_or_default();
+        let mut setup_error = String::new();
+        setup_reader
+            .read_to_string(&mut setup_error)
+            .map_err(|error| {
+                IsolationError::ProcessFailure(format!("setup channel read: {error}"))
+            })?;
+        if !setup_error.is_empty() {
+            return Err(IsolationError::ProcessFailure(setup_error));
+        }
         let exit_code = if libc::WIFEXITED(status) {
             libc::WEXITSTATUS(status)
         } else if libc::WIFSIGNALED(status) {

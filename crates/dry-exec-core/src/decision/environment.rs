@@ -29,6 +29,9 @@ pub struct DeltaSummary {
 
     /// State delta computation latency in nanoseconds.
     pub duration_nanos: u64,
+
+    /// Nonzero means the proposed action failed and needs review before commit.
+    pub exit_code: i32,
 }
 
 impl DeltaSummary {
@@ -48,6 +51,7 @@ impl DeltaSummary {
             schema_breaches: delta.schema_breaches,
             deferred_execution_hazards,
             duration_nanos: delta.duration_nanos,
+            exit_code: delta.exit_code,
         }
     }
 }

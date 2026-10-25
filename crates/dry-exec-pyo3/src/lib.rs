@@ -10,27 +10,34 @@ use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
+use std::io::{Seek, SeekFrom};
 use std::net::TcpStream;
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::OpenOptionsExt;
+#[cfg(target_os = "linux")]
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-
 /// Schema-driven mock endpoint: (method, path, status_code, headers, body).
 type MockEndpoint = (String, String, u16, HashMap<String, String>, Vec<u8>);
 
 static CAPTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// RAII capture file preventing symlink attacks (O_CREAT | O_EXCL with 0o600) and disk leakage on panic/error.
+#[cfg(target_os = "linux")]
 struct TempCaptureFile {
     path: PathBuf,
     file: Option<File>,
 }
 
+#[cfg(target_os = "linux")]
 impl TempCaptureFile {
     fn new(label: &str) -> Result<Self, String> {
         let pid = std::process::id();
@@ -68,19 +75,18 @@ impl TempCaptureFile {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for TempCaptureFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
 }
 
-/// RAII directory used for the pre-execution filesystem snapshot on macOS.
-#[cfg(target_os = "macos")]
+/// RAII directory used for pre-execution baseline clones.
 struct TempDirectory {
     path: PathBuf,
 }
 
-#[cfg(target_os = "macos")]
 impl TempDirectory {
     fn new(label: &str) -> Result<Self, String> {
         let pid = std::process::id();
@@ -99,7 +105,6 @@ impl TempDirectory {
     }
 }
 
-#[cfg(target_os = "macos")]
 impl Drop for TempDirectory {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
@@ -109,12 +114,74 @@ impl Drop for TempDirectory {
 create_exception!(_dry_exec_ffi, IsolationSetupError, PyException);
 create_exception!(_dry_exec_ffi, SyscallBoundaryError, PyException);
 create_exception!(_dry_exec_ffi, StateDeltaComputationError, PyException);
+create_exception!(_dry_exec_ffi, SchemaViolationError, PyException);
+
+/// Validate the action on the native side of the FFI boundary.
+///
+/// Python validates before crossing, but direct FFI callers bypass that gate. Re-checking the
+/// required shape and the authorized target set here keeps the boundary fail-closed for every
+/// entry point.
+fn validate_action_json(
+    py: Python<'_>,
+    action_json: &str,
+    allowed_targets: Option<&[String]>,
+) -> PyResult<()> {
+    let value: serde_json::Value = serde_json::from_str(action_json).map_err(|error| {
+        SchemaViolationError::new_err(format!("Action payload is not valid JSON: {error}"))
+    })?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| SchemaViolationError::new_err("Action payload must be a JSON object"))?;
+
+    let required_string = |field: &str| -> PyResult<String> {
+        object
+            .get(field)
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                SchemaViolationError::new_err(format!(
+                    "Action is missing required string field '{field}'"
+                ))
+            })
+    };
+
+    let _action_id = required_string("action_id")?;
+    let target_resource = required_string("target_resource")?;
+    let _mutation_type = required_string("mutation_type")?;
+    if !object
+        .get("payload")
+        .map(|value| value.is_object())
+        .unwrap_or(false)
+    {
+        return Err(SchemaViolationError::new_err(
+            "Action field 'payload' must be a JSON object",
+        ));
+    }
+
+    if let Some(allowed) = allowed_targets {
+        if !allowed
+            .iter()
+            .any(|candidate| candidate == "*" || candidate == &target_resource)
+        {
+            let error = SchemaViolationError::new_err(format!(
+                "Action targeting resource '{target_resource}' violates the native schema boundary"
+            ));
+            let value = error.value(py);
+            value.setattr("invalid_target", target_resource)?;
+            value.setattr("violation_type", "unauthorized_mutation_target")?;
+            return Err(error);
+        }
+    }
+
+    Ok(())
+}
 
 #[pyfunction]
 // The FFI boundary stays positional: each argument is a distinct facet of the ephemeral
 // execution request, and bundling them would complicate every Python caller for no gain.
 #[allow(clippy::too_many_arguments)]
-#[pyo3(signature = (action_json, memory_size, tmpfs_path, trigger_blocked_syscall, mock_endpoints=None, request_to_trigger=None, decision_thresholds=None, command=None))]
+#[pyo3(signature = (action_json, memory_size, tmpfs_path, trigger_blocked_syscall, mock_endpoints=None, request_to_trigger=None, decision_thresholds=None, command=None, allowed_targets=None, workspace_root=None, rootless=false))]
 fn execute_isolated_action(
     py: Python<'_>,
     action_json: String,
@@ -125,6 +192,9 @@ fn execute_isolated_action(
     request_to_trigger: Option<(String, String, String)>,
     decision_thresholds: Option<(usize, usize, f32)>,
     command: Option<Vec<String>>,
+    allowed_targets: Option<Vec<String>>,
+    workspace_root: Option<String>,
+    rootless: bool,
 ) -> PyResult<PyObject> {
     use dry_exec_core::decision::{evaluate, DeltaSummary, Environment};
     #[cfg(target_os = "linux")]
@@ -133,17 +203,51 @@ fn execute_isolated_action(
     #[cfg(target_os = "linux")]
     use dry_exec_core::delta::{NetworkBoundary, TransparentProxy};
 
-    let _ = action_json;
+    validate_action_json(py, &action_json, allowed_targets.as_deref())?;
     #[cfg(target_os = "macos")]
-    let _ = memory_size;
+    let _ = (memory_size, rootless);
+
+    // A virtualenv or hosted Python can live outside the system executable directories. Only
+    // grant its runtime reads when the command selects this exact interpreter; host application
+    // source and unrelated home directories remain outside the read allowance.
+    #[cfg(target_os = "macos")]
+    let python_runtime = {
+        let sys = py.import("sys")?;
+        let executable: String = sys.getattr("executable")?.extract()?;
+        let executable =
+            std::fs::canonicalize(&executable).unwrap_or_else(|_| PathBuf::from(executable));
+        let selected = command
+            .as_ref()
+            .and_then(|argv| argv.first())
+            .and_then(|program| std::fs::canonicalize(program).ok());
+        if selected.as_ref() == Some(&executable) {
+            let mut roots = Vec::new();
+            for name in ["prefix", "base_prefix", "exec_prefix", "base_exec_prefix"] {
+                let path: String = sys.getattr(name)?.extract()?;
+                let path = std::fs::canonicalize(&path).unwrap_or_else(|_| PathBuf::from(path));
+                if !roots.contains(&path) {
+                    roots.push(path);
+                }
+            }
+            Some((executable, roots))
+        } else {
+            None
+        }
+    };
 
     #[cfg(target_os = "linux")]
     let result = py.allow_threads(|| {
         use dry_exec_core::error::BoundaryExitStatus;
         use dry_exec_core::isolation::{
-            execute_isolated_process_with_inspection, MountConfig, ProcessBoundaryConfig,
-            SeccompFilter, SyscallAction,
+            execute_isolated_process_with_inspection, landlock_supported, MountConfig,
+            NamespaceFlags, ProcessBoundaryConfig, SeccompFilter, SyscallAction,
         };
+
+        if !landlock_supported() {
+            return Err(
+                "Linux filesystem isolation requires Landlock ABI 3 or newer".to_string(),
+            );
+        }
 
         let mut stdout_capture = TempCaptureFile::new("stdout")?;
         let mut stderr_capture = TempCaptureFile::new("stderr")?;
@@ -169,9 +273,24 @@ fn execute_isolated_action(
         };
 
         let mut coordinator = DeltaCoordinator::new();
-        let fs_root = std::path::Path::new(&tmpfs_path);
-        if let Err(e) = coordinator.snapshot_baseline(Some(fs_root)) {
-            return Err(format!("Filesystem baseline snapshot error: {e}"));
+        let workspace_path = workspace_root.as_ref().map(PathBuf::from);
+
+        // A workspace trial runs against a writable clone of the caller's tree. Snapshot a
+        // separate clone so the delta engine retains the exact pre-execution bytes while the
+        // child mutates the working clone. Without a workspace the boundary mounts a fresh
+        // tmpfs, whose baseline is empty regardless of what the host mountpoint contains.
+        let mut baseline_guard: Option<TempDirectory> = None;
+        match workspace_path.as_ref() {
+            Some(workspace) => {
+                let baseline = TempDirectory::new("baseline")?;
+                dry_exec_core::delta::clone_directory(workspace, baseline.path())
+                    .map_err(|e| format!("Filesystem baseline clone error: {e}"))?;
+                coordinator
+                    .snapshot_baseline(Some(baseline.path()))
+                    .map_err(|e| format!("Filesystem baseline snapshot error: {e}"))?;
+                baseline_guard = Some(baseline);
+            }
+            None => coordinator.snapshot_empty(std::path::Path::new(&tmpfs_path)),
         }
 
         // Reserve the loopback port for the schema-driven mock listener. The isolated execution
@@ -223,12 +342,26 @@ fn execute_isolated_action(
                 .allow(libc::SYS_fcntl);
         }
 
+        let command_cwd = workspace_path
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from(&tmpfs_path));
+        let workspace_for_delta = workspace_path.clone();
+
+        let namespaces = if rootless {
+            NamespaceFlags::default() | NamespaceFlags::USER
+        } else {
+            NamespaceFlags::default()
+        };
+
         let config = ProcessBoundaryConfig {
+            namespaces,
             mount_config: MountConfig {
                 tmpfs_path: std::path::PathBuf::from(&tmpfs_path),
                 mount_sterile_proc: true,
+                writable_paths: workspace_path.iter().cloned().collect(),
             },
             seccomp_filter: filter,
+            landlock: true,
             network_boundary,
             ..Default::default()
         };
@@ -243,7 +376,7 @@ fn execute_isolated_action(
                 if let Some(argv) = command_for_child {
                     if let Some(program) = argv.first() {
                         let mut process = Command::new(program);
-                        process.args(&argv[1..]).current_dir(&tmpfs_path);
+                        process.args(&argv[1..]).current_dir(&command_cwd);
                         if let Some(port) = proxy_port {
                             let proxy = format!("http://127.0.0.1:{port}");
                             process
@@ -310,9 +443,10 @@ fn execute_isolated_action(
                 if let Some(proxy) = context.network {
                     coordinator.set_network_proxy(proxy);
                 }
-                coordinator.compute_full_delta(
+                coordinator.compute_full_delta_at(
                     context.child_pid,
                     region.as_ref().map(|r| (r, memory_size)),
+                    workspace_for_delta.as_deref(),
                 )
             },
         );
@@ -321,6 +455,7 @@ fn execute_isolated_action(
             Ok(s) => s,
             Err(e) => return Err(format!("Execution boundary error: {e}")),
         };
+        drop(baseline_guard);
 
         match status {
             BoundaryExitStatus::SyscallViolation {
@@ -341,13 +476,18 @@ fn execute_isolated_action(
                     .ok_or_else(|| "Boundary inspection did not execute".to_string())?
                     .map_err(|e| format!("Delta computation error: {e}"))?;
 
-                delta.stdout = stdout_capture.read_and_unlink()?;
-                delta.stderr = stderr_capture.read_and_unlink()?;
+                let stdout_bytes = stdout_capture.read_and_unlink()?;
+                let stderr_bytes = stderr_capture.read_and_unlink()?;
                 let status_bytes = status_capture.read_and_unlink()?;
-                delta.exit_code = String::from_utf8_lossy(&status_bytes)
-                    .trim()
-                    .parse()
-                    .unwrap_or(127);
+
+                if command.as_ref().is_some_and(|argv| !argv.is_empty()) {
+                    delta.stdout = stdout_bytes;
+                    delta.stderr = stderr_bytes;
+                    delta.exit_code = String::from_utf8_lossy(&status_bytes)
+                        .trim()
+                        .parse()
+                        .unwrap_or(127);
+                }
 
                 Ok(delta)
             }
@@ -360,18 +500,18 @@ fn execute_isolated_action(
             execute_macos_command, execute_macos_isolated_process, SeatbeltConfig,
         };
 
-        let mut stdout_capture = TempCaptureFile::new("stdout")?;
-        let mut stderr_capture = TempCaptureFile::new("stderr")?;
-        let stdout_fd = stdout_capture.as_raw_fd();
-        let stderr_fd = stderr_capture.as_raw_fd();
-        let command_for_child = command.clone();
 
         let mut coordinator = DeltaCoordinator::new();
-        let requested_scratch_dir = std::path::PathBuf::from(if tmpfs_path.is_empty() {
-            "/private/tmp/dex_ephemeral"
-        } else {
-            &tmpfs_path
-        });
+        let requested_scratch_dir = workspace_root
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(if tmpfs_path.is_empty() {
+                    "/private/tmp/dex_ephemeral"
+                } else {
+                    &tmpfs_path
+                })
+            });
 
         let _ = std::fs::create_dir_all(&requested_scratch_dir);
         let scratch_dir = std::fs::canonicalize(&requested_scratch_dir)
@@ -380,7 +520,7 @@ fn execute_isolated_action(
         // Snapshot the scratch root before execution so later deltas report modifications and
         // deletions, not just files that happen to remain at the end of the trial.
         let baseline_dir = TempDirectory::new("baseline")?;
-        dry_exec_core::delta::apfs_clone_directory(&scratch_dir, baseline_dir.path())
+        dry_exec_core::delta::clone_directory(&scratch_dir, baseline_dir.path())
             .map_err(|e| format!("Filesystem baseline snapshot error: {e}"))?;
 
         let proxy_port = if let Some(endpoints) = mock_endpoints {
@@ -405,10 +545,22 @@ fn execute_isolated_action(
             None
         };
 
-        let seatbelt_config = SeatbeltConfig {
-            allowed_write_paths: vec![scratch_dir.clone()],
+        let mut allowed_write_paths = vec![scratch_dir.clone()];
+        if !tmpfs_path.is_empty() {
+            let ephemeral_root = std::path::PathBuf::from(&tmpfs_path);
+            if ephemeral_root != scratch_dir {
+                allowed_write_paths.push(ephemeral_root);
+            }
+        }
+        let mut seatbelt_config = SeatbeltConfig {
+            allowed_write_paths,
+            loopback_proxy_port: proxy_port,
             ..SeatbeltConfig::default()
         };
+        if let Some((executable, roots)) = &python_runtime {
+            seatbelt_config.allowed_exec_paths.push(executable.clone());
+            seatbelt_config.allowed_read_paths.extend(roots.iter().cloned());
+        }
 
         let proxy_url = proxy_port.map(|port| format!("http://127.0.0.1:{port}"));
         let boundary_res = if let Some(argv) = command.as_ref() {
@@ -431,46 +583,6 @@ fn execute_isolated_action(
                     return 126;
                 }
                 return 0;
-            }
-
-            if let Some(argv) = command_for_child {
-                    if let Some(program) = argv.first() {
-                    let mut process = Command::new(program);
-                    process.args(&argv[1..]).current_dir(&scratch_dir);
-                    if let Some(port) = proxy_port {
-                        let proxy = format!("http://127.0.0.1:{port}");
-                        process
-                            .env("HTTP_PROXY", &proxy)
-                            .env("HTTPS_PROXY", &proxy)
-                            .env("ALL_PROXY", &proxy)
-                            .env("http_proxy", &proxy)
-                            .env("https_proxy", &proxy)
-                            .env("all_proxy", &proxy)
-                            .env("NO_PROXY", "");
-                    }
-                    let output = process.output();
-                    let (stdout, stderr, exit_code) = match output {
-                        Ok(output) => (
-                            output.stdout,
-                            output.stderr,
-                            output.status.code().unwrap_or(128),
-                        ),
-                        Err(error) => (
-                            Vec::new(),
-                            format!("failed to execute command: {error}\n").into_bytes(),
-                            127,
-                        ),
-                    };
-                    unsafe {
-                        let mut out = std::mem::ManuallyDrop::new(File::from_raw_fd(stdout_fd));
-                        let mut err = std::mem::ManuallyDrop::new(File::from_raw_fd(stderr_fd));
-                        let _ = out.write_all(&stdout);
-                        let _ = err.write_all(&stderr);
-                        let _ = out.flush();
-                        let _ = err.flush();
-                    }
-                    return exit_code;
-                }
             }
 
             if let Some((method, path, body)) = request_to_trigger {
@@ -512,8 +624,6 @@ fn execute_isolated_action(
             let (stdout, stderr) = macos_output.unwrap_or_default();
             delta.stdout = stdout;
             delta.stderr = stderr;
-            let _ = stdout_capture.read_and_unlink();
-            let _ = stderr_capture.read_and_unlink();
             delta.exit_code = status_code;
         }
 
@@ -654,9 +764,34 @@ fn execute_isolated_action(
     }
 }
 
+/// Report native isolation capabilities without executing an action.
+#[pyfunction]
+fn isolation_capabilities() -> (bool, bool) {
+    #[cfg(target_os = "linux")]
+    {
+        (
+            dry_exec_core::isolation::landlock_supported(),
+            dry_exec_core::isolation::user_namespace_supported(),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        (false, false)
+    }
+}
+
+/// Clone a directory tree using the platform's copy-on-write primitive.
+#[pyfunction]
+fn clone_directory(src: String, dst: String) -> PyResult<()> {
+    dry_exec_core::delta::clone_directory(std::path::Path::new(&src), std::path::Path::new(&dst))
+        .map_err(|e| IsolationSetupError::new_err(format!("Workspace clone error: {e}")))
+}
+
 #[pymodule]
 fn _dry_exec_ffi(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(execute_isolated_action, m)?)?;
+    m.add_function(wrap_pyfunction!(isolation_capabilities, m)?)?;
+    m.add_function(wrap_pyfunction!(clone_directory, m)?)?;
     m.add("IsolationSetupError", py.get_type::<IsolationSetupError>())?;
     m.add(
         "SyscallBoundaryError",
@@ -665,6 +800,10 @@ fn _dry_exec_ffi(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "StateDeltaComputationError",
         py.get_type::<StateDeltaComputationError>(),
+    )?;
+    m.add(
+        "SchemaViolationError",
+        py.get_type::<SchemaViolationError>(),
     )?;
     Ok(())
 }

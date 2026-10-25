@@ -31,3 +31,7 @@ echo " Phase 6: Running System-One Decision Layer Suite (Loop 13)..."
 echo "================================================================="
 pytest -v tests/test_decision.py
 
+echo "================================================================="
+echo " Phase 7: Running Trial, MCP & Real Workspace Suite..."
+echo "================================================================="
+pytest -v tests/test_trial_and_mcp.py tests/test_workspace_trial_real.py tests/test_release_regressions.py

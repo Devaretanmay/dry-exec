@@ -26,6 +26,7 @@ class AgentExecutionResult:
         final_delta: Optional[StateDelta] = None,
         committed: bool = False,
         error_history: Optional[List[str]] = None,
+        routing_decision: str = "none",
     ):
         self.task = task
         self.success = success
@@ -33,6 +34,7 @@ class AgentExecutionResult:
         self.final_delta = final_delta
         self.committed = committed
         self.error_history = error_history or []
+        self.routing_decision = routing_decision
 
     def __repr__(self) -> str:
         return (
@@ -53,6 +55,7 @@ class Agent:
         client: Optional[DryExecClient] = None,
         logger: Optional[Any] = None,
         max_retries: int = 3,
+        workspace_dir: Optional[str] = None,
     ):
         self.task = task
         self.environment = environment or Environment(
@@ -63,6 +66,7 @@ class Agent:
         self.client = client or DryExecClient()
         self.logger = logger
         self.max_retries = max_retries
+        self.workspace_dir = workspace_dir
         self.llm = llm or llm_caller or self._resolve_default_llm()
 
     def _resolve_default_llm(self) -> Callable[[str, List[Dict[str, str]]], str]:
@@ -142,10 +146,23 @@ class Agent:
             if self.logger is not None:
                 self.logger.render_action_header(self.environment, action)
 
+            trial_result = None
             try:
-                delta: StateDelta = await self.client.execute_ephemeral_action(
-                    self.environment, action
-                )
+                # A workspace-backed commit runs the trial exactly once. Without a workspace the
+                # loop can only evaluate the delta; it must not claim a durable commit it cannot
+                # apply.
+                if auto_commit and self.workspace_dir:
+                    trial_result = await self.client.run_trial(
+                        self.environment,
+                        action,
+                        workspace_dir=self.workspace_dir,
+                    )
+                    delta: StateDelta = trial_result.delta
+                else:
+                    delta = await self.client.execute_ephemeral_action(
+                        self.environment, action
+                    )
+
                 if self.logger is not None:
                     self.logger.render_delta(delta, trial_id=trial)
                     self.logger.render_decision(delta.decision)
@@ -159,26 +176,28 @@ class Agent:
                         choice=delta.decision.choice.value,
                     )
 
-                if auto_commit:
+                routing = (
+                    delta.decision.noul_trigger.value
+                    if delta.decision is not None
+                    else "none"
+                )
+                if auto_commit and trial_result is not None:
+                    await trial_result.commit(force=force)
+                    committed = True
                     if self.logger is not None:
                         self.logger.render_commit_prompt(confirmed=True)
-                    return AgentExecutionResult(
-                        task=active_task,
-                        success=True,
-                        trials_conducted=trial,
-                        final_delta=delta,
-                        committed=True,
-                        error_history=error_history,
-                    )
                 else:
-                    return AgentExecutionResult(
-                        task=active_task,
-                        success=True,
-                        trials_conducted=trial,
-                        final_delta=delta,
-                        committed=False,
-                        error_history=error_history,
-                    )
+                    committed = False
+
+                return AgentExecutionResult(
+                    task=active_task,
+                    success=True,
+                    trials_conducted=trial,
+                    final_delta=delta,
+                    committed=committed,
+                    error_history=error_history,
+                    routing_decision=routing,
+                )
 
             except SchemaViolationError as sve:
                 err_msg = f"Schema boundary violation: {sve.violation_type} on target '{sve.invalid_target}'"
@@ -226,6 +245,13 @@ class Agent:
                 conversation_history.append(
                     {"role": "user", "content": f"Boundary error: {err_msg}."}
                 )
+            finally:
+                if (
+                    trial_result is not None
+                    and not trial_result.is_committed
+                    and not trial_result.is_rolled_back
+                ):
+                    await trial_result.rollback()
 
         return AgentExecutionResult(
             task=active_task,

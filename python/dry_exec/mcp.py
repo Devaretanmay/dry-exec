@@ -6,17 +6,20 @@ safe tool execution outputs. Zero external runtime dependencies required.
 """
 
 import functools
+import ast
 import inspect
 import json
 import os
 from pathlib import Path
 import tempfile
+import sys
+import stat
 import textwrap
 from typing import Any, Callable, Optional
 import uuid
 from pydantic import BaseModel, ConfigDict, Field
 
-from dry_exec.client import DryExecClient, Trial
+from dry_exec.client import DryExecClient
 from dry_exec.decision import enforce_escalation
 from dry_exec.models import DecisionReceipt, StateDelta
 from dry_exec.schemas import Action, Environment
@@ -44,11 +47,14 @@ def _prepare_tool_script(
 ) -> str:
     """Serializes tool function into an isolated Python runner script."""
     source = textwrap.dedent(inspect.getsource(fn))
-    lines = []
-    for line in source.splitlines():
-        if lines or not line.lstrip().startswith("@"):
-            lines.append(line)
-    cleaned_source = "\n".join(lines)
+    module = ast.parse(source)
+    definition = next(
+        node
+        for node in module.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    )
+    definition.decorator_list = []
+    cleaned_source = ast.unparse(definition)
 
     return f"""import sys, json, asyncio, inspect, os
 from pathlib import Path
@@ -101,14 +107,18 @@ async def sandboxed_mcp_call(
         ) as handle:
             handle.write(script_content)
             script_path = handle.name
-        command = ["/bin/sh", "-c", f"python3 {script_path}"]
-    except (TypeError, OSError):
+        command = [sys.executable, script_path]
+    except (TypeError, OSError) as error:
         # Fallback if function source cannot be extracted (built-in or C-extension)
         raw_cmd = kwargs.get("command")
         if isinstance(raw_cmd, list):
             command = raw_cmd
         elif isinstance(raw_cmd, str) and raw_cmd.strip():
             command = ["/bin/sh", "-c", raw_cmd]
+        else:
+            raise TypeError(
+                "Tool source is unavailable; supply an explicit command"
+            ) from error
 
     action = Action(
         action_id=f"mcp_act_{tool_name}_{uuid.uuid4().hex[:6]}",
@@ -122,52 +132,53 @@ async def sandboxed_mcp_call(
         },
     )
 
-    trial: Trial = await exec_client.run_trial(
-        environment=env,
-        action=action,
-        workspace_dir=workspace_dir,
-    )
+    trial = None
+    try:
+        trial = await exec_client.run_trial(
+            environment=env,
+            action=action,
+            workspace_dir=workspace_dir,
+        )
 
-    result = None
-    if trial._scratch_dir:
-        res_path = Path(trial._scratch_dir) / result_file_name
-        if res_path.exists():
+        result = None
+        if trial._scratch_dir:
+            res_path = Path(trial._scratch_dir) / result_file_name
+            # Open without following links or blocking on tool-created FIFOs, then check the
+            # opened inode so a background tool cannot race a separate pathname check.
             try:
-                result = json.loads(res_path.read_text())
-            except Exception:
-                result = res_path.read_text()
-            try:
-                res_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+                result_fd = os.open(
+                    res_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                )
+            except FileNotFoundError:
+                result_fd = None
+            if result_fd is not None:
+                with os.fdopen(result_fd, "r") as handle:
+                    if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                        raise ValueError("Tool result must be a regular file")
+                    content = handle.read()
+                try:
+                    result = json.loads(content)
+                except ValueError:
+                    result = content
+                res_path.unlink()
 
-    # If mock FFI was used (e.g. in test mocks where subprocess doesn't execute), compute mock result
-    if result is None and hasattr(getattr(exec_client, "_ffi", None), "delta_dict"):
-        if inspect.iscoroutinefunction(tool_fn):
-            result = await tool_fn(*args, **kwargs)
-        else:
-            result = tool_fn(*args, **kwargs)
+        committed = False
+        if auto_commit and workspace_dir is not None:
+            enforce_escalation(trial.decision, force=False)
+            await trial.commit()
+            committed = trial.is_committed
 
-    if script_path and os.path.exists(script_path):
-        try:
-            os.unlink(script_path)
-        except Exception:
-            pass
-
-    committed = False
-    if auto_commit:
-        enforce_escalation(trial.decision, force=False)
-        await trial.commit()
-        committed = True
-    else:
-        await trial.rollback()
-
-    return SandboxedToolResult(
-        result=result,
-        delta=trial.delta,
-        decision=trial.decision,
-        committed=committed,
-    )
+        return SandboxedToolResult(
+            result=result,
+            delta=trial.delta,
+            decision=trial.decision,
+            committed=committed,
+        )
+    finally:
+        if trial is not None and not trial.is_committed:
+            await trial.rollback()
+        if script_path:
+            Path(script_path).unlink(missing_ok=True)
 
 
 def sandboxed_mcp_tool(

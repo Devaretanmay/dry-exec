@@ -145,8 +145,8 @@ async def test_agent_halts_on_escalation(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_agent_force_commits_escalated_delta(monkeypatch):
-    """Verify a forced autonomous execution loop proceeds past escalation."""
+async def test_agent_force_bypasses_escalation_without_claiming_commit(monkeypatch):
+    """A forced run without a workspace must not report a durable commit it never applied."""
     import dry_exec.agent
 
     async def mock_exec(*args, **kwargs):
@@ -159,13 +159,72 @@ async def test_agent_force_commits_escalated_delta(monkeypatch):
     agent = dry_exec.agent.Agent(task="Mutate ledger balance")
     result = await agent.run(auto_commit=True, force=True)
 
+    assert result.committed is False
+    assert result.routing_decision == "escalate"
+
+
+@pytest.mark.asyncio
+async def test_agent_workspace_commit_applies_captured_delta_once(
+    monkeypatch, tmp_path
+):
+    """A workspace-backed auto-commit applies the captured delta exactly once."""
+    import dry_exec.agent
+    from dry_exec.client import Trial
+    from dry_exec.models import FsMutation
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "state.txt"
+    target.write_text("before")
+
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "state.txt").write_text("after")
+
+    delta = StateDelta(
+        total_bytes_mutated=5,
+        duration_nanos=1,
+        fs_mutations=[
+            FsMutation(mutation_type="modified", path=str(scratch / "state.txt"))
+        ],
+        decision=_receipt(),
+    )
+    environment = Environment()
+    action = Action(
+        action_id="act_commit_once",
+        target_resource="state.txt",
+        mutation_type="modify",
+    )
+    trial = Trial(
+        delta=delta,
+        environment=environment,
+        action=action,
+        scratch_dir=str(scratch),
+        workspace_dir=str(workspace),
+    )
+
+    async def mock_run_trial(*args, **kwargs):
+        return trial
+
+    monkeypatch.setattr(dry_exec.agent.DryExecClient, "run_trial", mock_run_trial)
+
+    agent = dry_exec.agent.Agent(
+        task="write state",
+        llm=lambda task, history: action.model_dump_json(),
+        workspace_dir=str(workspace),
+    )
+    result = await agent.run(auto_commit=True)
+
     assert result.committed is True
+    assert result.routing_decision == "auto_commit"
+    assert target.read_text() == "after"
 
 
-def test_dry_run_decorator_halts_on_escalation(monkeypatch):
+def test_dry_run_decorator_halts_on_escalation(monkeypatch, tmp_path):
     """Verify the dry_run decorator halts on escalation unless the commit is forced."""
     import dry_exec
     import dry_exec.client
+    from dry_exec.client import Trial
 
     async def mock_exec(*args, **kwargs):
         return _escalated_delta()
@@ -181,10 +240,29 @@ def test_dry_run_decorator_halts_on_escalation(monkeypatch):
     with pytest.raises(DecisionEscalationError):
         credit_balance(100)
 
+    scratch = tmp_path / "scratch"
+    workspace = tmp_path / "workspace"
+    scratch.mkdir()
+    workspace.mkdir()
+    delta = _escalated_delta()
+
+    async def mock_run_trial(self, environment, action, workspace_dir=None, **kwargs):
+        return Trial(
+            delta=delta,
+            environment=environment,
+            action=action,
+            scratch_dir=str(scratch),
+            workspace_dir=str(workspace),
+        )
+
+    monkeypatch.setattr(dry_exec.client.DryExecClient, "run_trial", mock_run_trial)
+
     def settle_balance(amount: int) -> dict:
         return {"settled": amount}
 
-    forced_result = dry_exec.run(settle_balance, 100, commit=True)
+    forced_result = dry_exec.run(
+        settle_balance, 100, commit=True, workspace_dir=str(workspace)
+    )
     assert forced_result.decision.noul_trigger is Noul.ESCALATE
 
 

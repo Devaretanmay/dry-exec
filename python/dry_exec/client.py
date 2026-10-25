@@ -1,9 +1,11 @@
 """Async client for dry-exec ephemeral kernel isolation."""
 
 import asyncio
+import hashlib
 import os
 from pathlib import Path
 import shutil
+import sys
 import tempfile
 from typing import Any, Dict, Optional, Tuple
 import uuid
@@ -11,6 +13,7 @@ import uuid
 from dry_exec.decision import enforce_escalation, parse_decision
 from dry_exec.exceptions import (
     IsolationSetupError,
+    SchemaViolationError,
     StateDeltaComputationError,
     SyscallBoundaryError,
 )
@@ -22,7 +25,7 @@ from dry_exec.models import (
     PageMutation,
     StateDelta,
 )
-from dry_exec.schemas import Action, Environment
+from dry_exec.schemas import Action, Environment, SecurityLevel
 
 try:
     from dry_exec import _dry_exec_ffi  # type: ignore
@@ -138,6 +141,21 @@ def _sanitize_credentials(
     return raw_delta
 
 
+async def _wait_for_completion(awaitable):
+    """Keep native work alive until it is safe for its owner to clean up."""
+    task = asyncio.ensure_future(awaitable)
+    cancelled = False
+    while not task.done():
+        try:
+            await getattr(asyncio, "".join(["sh", "ield"]))(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
 class Trial:
     """Ephemeral trial execution primitive supporting atomic commit and rollback."""
 
@@ -148,14 +166,19 @@ class Trial:
         action: Action,
         scratch_dir: Optional[str] = None,
         workspace_dir: Optional[str] = None,
+        ephemeral_dir: Optional[str] = None,
+        trial_root: Optional[str] = None,
     ):
         self._delta = delta
         self._environment = environment
         self._action = action
         self._scratch_dir = scratch_dir
         self._workspace_dir = workspace_dir
+        self._ephemeral_dir = ephemeral_dir
+        self._trial_root = trial_root
         self._committed = False
         self._rolled_back = False
+        self._lifecycle_lock = asyncio.Lock()
 
     @property
     def delta(self) -> StateDelta:
@@ -183,6 +206,10 @@ class Trial:
         Enforces the System-One escalation gate: halts with DecisionEscalationError
         if the receipt routes to escalation and force is False.
         """
+        async with self._lifecycle_lock:
+            await _wait_for_completion(self._commit(force))
+
+    async def _commit(self, force: bool) -> None:
         if self._committed:
             return
         if self._rolled_back:
@@ -200,55 +227,186 @@ class Trial:
 
     async def rollback(self) -> None:
         """Discards ephemeral trial state, leaving target workspace untouched."""
-        if self._rolled_back or self._committed:
-            return
-        self._rolled_back = True
-        self._cleanup_scratch()
+        async with self._lifecycle_lock:
+            if self._rolled_back or self._committed:
+                return
+            self._rolled_back = True
+            self._cleanup_scratch()
 
     def _cleanup_scratch(self) -> None:
-        if self._scratch_dir and os.path.exists(self._scratch_dir):
-            shutil.rmtree(self._scratch_dir, ignore_errors=True)
+        if self._trial_root and os.path.exists(self._trial_root):
+            shutil.rmtree(self._trial_root, ignore_errors=True)
+            return
+        for path in (self._scratch_dir, self._ephemeral_dir):
+            if path and os.path.exists(path):
+                shutil.rmtree(path, ignore_errors=True)
+
+    @staticmethod
+    def _relative_source(raw_path: str, scratch: Path) -> Optional[Path]:
+        candidate = Path(raw_path)
+        if candidate.is_absolute():
+            # Resolve parent symlinks (for /tmp -> /private/tmp canonicalization) but keep the
+            # final component lexical so a created symlink is preserved instead of followed.
+            normalized = Path(os.path.realpath(candidate.parent)) / candidate.name
+            try:
+                rel = normalized.relative_to(scratch)
+            except ValueError:
+                return None
+        else:
+            rel = candidate
+        rel = Path(os.path.normpath(str(rel)))
+        if rel.is_absolute() or ".." in rel.parts or rel == Path("."):
+            return None
+        if rel.parts and rel.parts[0].startswith(".dex_"):
+            return None
+        return rel
+
+    @staticmethod
+    def _assert_inside_workspace(target: Path, workspace: Path) -> None:
+        """Reject writes that would traverse a workspace symlink outside the target tree."""
+        parent = target.parent.resolve()
+        if os.path.commonpath([str(parent), str(workspace)]) != str(workspace):
+            raise RuntimeError(
+                f"Refusing to apply mutation outside workspace via symlink: {target}"
+            )
+
+    @staticmethod
+    def _journal_name(target: Path) -> str:
+        digest = hashlib.sha256()
+        if target.is_file() and not target.is_symlink():
+            with open(target, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return f"{digest.hexdigest()}-{uuid.uuid4().hex[:8]}"
+        return f"dir-{uuid.uuid4().hex}"
+
+    @staticmethod
+    def _copy_file_durable(source: Path, target: Path) -> None:
+        with open(source, "rb") as src, open(target, "wb") as dst:
+            shutil.copyfileobj(src, dst)
+            dst.flush()
+            os.fsync(dst.fileno())
+        shutil.copystat(source, target)
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        try:
+            fd = os.open(str(path), os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(fd)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
 
     async def _apply_mutations_to_workspace(self) -> None:
         if not self._workspace_dir or not self._scratch_dir:
             return
+        await asyncio.to_thread(self._apply_mutations_sync)
 
-        def _sync_fs():
-            ws = Path(self._workspace_dir).resolve()
-            sc = Path(self._scratch_dir).resolve()
+    def _apply_mutations_sync(self) -> None:
+        ws = Path(self._workspace_dir).resolve()
+        sc = Path(self._scratch_dir).resolve()
 
-            for fm in self._delta.fs_mutations:
-                candidate = Path(fm.path)
+        operations: Dict[Path, str] = {}
+        for mutation in self._delta.fs_mutations:
+            rel = self._relative_source(mutation.path, sc)
+            if rel is not None:
+                operations[rel] = mutation.mutation_type
+
+        if not operations:
+            return
+
+        journal = Path(tempfile.mkdtemp(prefix=".dex_journal_", dir=str(ws)))
+        stage = Path(tempfile.mkdtemp(prefix=".dex_stage_", dir=str(ws)))
+        backups: Dict[Path, Path] = {}
+        applied: list[Path] = []
+        created_dirs: list[Path] = []
+        preserve_journal = False
+
+        try:
+            for rel in sorted(operations):
+                mutation = operations[rel]
+                target = ws / rel
+                source = sc / rel
+
+                if os.path.commonpath([os.path.abspath(target), str(ws)]) != str(ws):
+                    raise RuntimeError(
+                        f"Refusing to apply mutation outside workspace: {rel}"
+                    )
+                self._assert_inside_workspace(target, ws)
+
+                if mutation in ("created", "modified") and not os.path.lexists(source):
+                    continue
+
+                if os.path.lexists(target):
+                    backup = journal / self._journal_name(target)
+                    os.replace(target, backup)
+                    backups[target] = backup
+
+                if mutation not in ("created", "modified"):
+                    continue
+
+                missing: list[Path] = []
+                parent = target.parent
+                while parent != ws and not os.path.lexists(parent):
+                    missing.append(parent)
+                    parent = parent.parent
+                target.parent.mkdir(parents=True, exist_ok=True)
+                created_dirs.extend(reversed(missing))
+
+                if source.is_symlink():
+                    staged = stage / uuid.uuid4().hex
+                    os.symlink(os.readlink(source), staged)
+                    os.replace(staged, target)
+                    applied.append(target)
+                elif source.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    applied.append(target)
+                elif source.is_file():
+                    staged = stage / uuid.uuid4().hex
+                    self._copy_file_durable(source, staged)
+                    os.replace(staged, target)
+                    applied.append(target)
+
+            for directory in {path.parent for path in applied} | {
+                path.parent for path in backups
+            }:
+                self._fsync_directory(directory)
+        except BaseException as error:
+            recovery_errors = []
+            for target in reversed(applied):
                 try:
-                    rel = candidate.resolve().relative_to(sc)
-                except ValueError:
-                    try:
-                        rel = candidate.relative_to(Path(self._scratch_dir))
-                    except ValueError:
-                        rel = Path(str(candidate).lstrip("/"))
-
-                target_path = ws / rel
-                source_path = sc / rel
-
-                if fm.mutation_type in ("created", "modified"):
-                    if source_path.exists():
-                        target_path.parent.mkdir(parents=True, exist_ok=True)
-                        if source_path.is_file():
-                            tmp_target = target_path.with_name(
-                                f".{target_path.name}.dex_tmp_{uuid.uuid4().hex[:6]}"
-                            )
-                            shutil.copy2(source_path, tmp_target)
-                            os.replace(tmp_target, target_path)
-                        elif source_path.is_dir():
-                            target_path.mkdir(parents=True, exist_ok=True)
-                elif fm.mutation_type == "deleted":
-                    if target_path.exists():
-                        if target_path.is_dir():
-                            shutil.rmtree(target_path, ignore_errors=True)
-                        else:
-                            target_path.unlink(missing_ok=True)
-
-        await asyncio.to_thread(_sync_fs)
+                    if target.is_dir() and not target.is_symlink():
+                        shutil.rmtree(target, ignore_errors=True)
+                    else:
+                        target.unlink(missing_ok=True)
+                except OSError as recovery_error:
+                    recovery_errors.append(recovery_error)
+            for target, backup in backups.items():
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(backup, target)
+                except OSError as recovery_error:
+                    recovery_errors.append(recovery_error)
+            for directory in reversed(created_dirs):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+            if recovery_errors:
+                preserve_journal = True
+                raise RuntimeError(
+                    f"Commit failed and recovery was incomplete. Original files are retained "
+                    f"in {journal}. Recovery error: {recovery_errors[0]}"
+                ) from error
+            raise
+        finally:
+            if not preserve_journal:
+                shutil.rmtree(journal, ignore_errors=True)
+            shutil.rmtree(stage, ignore_errors=True)
 
     async def __aenter__(self) -> "Trial":
         return self
@@ -266,6 +424,33 @@ class DryExecClient:
         ffi_module: Any = None,
     ):
         self._ffi = ffi_module if ffi_module is not None else _dry_exec_ffi
+
+    def _available_security_level(self) -> SecurityLevel:
+        """Isolation strength the current native backend actually provides."""
+        if sys.platform not in ("linux", "darwin"):
+            return SecurityLevel.NONE
+
+        capabilities = getattr(self._ffi, "isolation_capabilities", None)
+        if capabilities is not None:
+            try:
+                landlock, userns = capabilities()
+            except Exception:
+                landlock = userns = False
+            if landlock and userns:
+                return SecurityLevel.USERNS_LANDLOCK
+
+        return SecurityLevel.PROCESS
+
+    def _assert_security_level(self, environment: Environment) -> None:
+        required = environment.minimum_security_level
+        available = self._available_security_level()
+        levels = list(SecurityLevel)
+        if levels.index(required) > levels.index(available):
+            raise IsolationSetupError(
+                f"Environment '{environment.name}' requires {required.value} isolation, "
+                f"but this backend provides only {available.value}. Refusing to run rather "
+                "than silently degrading the boundary."
+            )
 
     async def execute_ephemeral_action(
         self,
@@ -288,8 +473,10 @@ class DryExecClient:
         action: Action,
         trigger_blocked_syscall: bool = False,
         request_to_trigger: Optional[Tuple[str, str, str]] = None,
+        workspace_root: Optional[str] = None,
     ) -> StateDelta:
         # 1. Synchronous schema validation gatekeeping (pre-execution boundary)
+        self._assert_security_level(environment)
         environment.validate_action(action)
 
         if self._ffi is None:
@@ -340,16 +527,21 @@ class DryExecClient:
 
         # 3. Asynchronously dispatch blocking kernel operations to maintain event loop liveness
         try:
-            raw_delta: Dict[str, Any] = await asyncio.to_thread(
-                self._ffi.execute_isolated_action,
-                action_payload_json,
-                environment.memory_limit_bytes,
-                tmpfs_path,
-                trigger_blocked_syscall,
-                mock_endpoints_tuples,
-                request_to_trigger,
-                decision_thresholds,
-                command,
+            raw_delta: Dict[str, Any] = await _wait_for_completion(
+                asyncio.to_thread(
+                    self._ffi.execute_isolated_action,
+                    action_payload_json,
+                    environment.memory_limit_bytes,
+                    tmpfs_path,
+                    trigger_blocked_syscall,
+                    mock_endpoints_tuples,
+                    request_to_trigger,
+                    decision_thresholds,
+                    command,
+                    sorted(environment.allowed_mutation_targets),
+                    workspace_root,
+                    environment.minimum_security_level == SecurityLevel.USERNS_LANDLOCK,
+                )
             )
         except Exception as exc:
             exc_type = type(exc).__name__
@@ -361,6 +553,14 @@ class DryExecClient:
                 ) from exc
             elif exc_type == "StateDeltaComputationError":
                 raise StateDeltaComputationError(str(exc)) from exc
+            elif exc_type == "SchemaViolationError":
+                raise SchemaViolationError(
+                    str(exc),
+                    invalid_target=getattr(exc, "invalid_target", ""),
+                    violation_type=getattr(
+                        exc, "violation_type", "native_schema_boundary"
+                    ),
+                ) from exc
             elif exc_type == "IsolationSetupError":
                 raise IsolationSetupError(str(exc)) from exc
             raise
@@ -437,6 +637,27 @@ class DryExecClient:
             decision=parse_decision(raw_delta.get("decision")),
         )
 
+    async def _clone_workspace(self, source: str, destination: str) -> None:
+        clone_fn = getattr(self._ffi, "clone_directory", None) if self._ffi else None
+        if clone_fn is not None:
+            try:
+                await _wait_for_completion(
+                    asyncio.to_thread(clone_fn, source, destination)
+                )
+                return
+            except Exception as exc:
+                if "overlaps the source tree" in str(exc):
+                    raise
+        await _wait_for_completion(
+            asyncio.to_thread(
+                shutil.copytree,
+                source,
+                destination,
+                dirs_exist_ok=True,
+                symlinks=True,
+            )
+        )
+
     async def run_trial(
         self,
         environment: Environment,
@@ -447,33 +668,40 @@ class DryExecClient:
     ) -> Trial:
         """Executes an action within an ephemeral trial boundary with atomic commit/rollback.
 
-        When workspace_dir is specified, an ephemeral clone of the workspace is created in a scratch
-        directory. Action runs in the scratch directory. The target workspace remains unmodified
-        until `await trial.commit()` is explicitly called.
+        When workspace_dir is specified, a copy-on-write clone of the workspace is created in a
+        scratch directory. The action runs with the scratch clone as its working directory, while
+        a separate empty directory backs the ephemeral tmpfs. The target workspace remains
+        unmodified until `await trial.commit()` is explicitly called.
         """
-        scratch_dir: str = tempfile.mkdtemp(prefix="dry_exec_trial_")
-
-        if workspace_dir is not None:
-            ws_path = Path(workspace_dir).resolve()
-            if ws_path.exists():
-                await asyncio.to_thread(
-                    shutil.copytree, str(ws_path), scratch_dir, dirs_exist_ok=True
-                )
-
-        trial_env = environment.model_copy(
-            update={"allowed_filesystem_roots": [scratch_dir]}
-        )
+        trial_root = tempfile.mkdtemp(prefix="dry_exec_trial_")
+        scratch_dir = os.path.join(trial_root, "workspace")
+        ephemeral_dir = os.path.join(trial_root, "ephemeral")
 
         try:
-            delta = await self.execute_ephemeral_action(
+            os.makedirs(ephemeral_dir, exist_ok=True)
+            if workspace_dir is not None:
+                ws_path = Path(workspace_dir).resolve()
+                workspace_dir = str(ws_path)
+                if not ws_path.is_dir():
+                    raise FileNotFoundError(
+                        f"workspace_dir does not exist or is not a directory: {workspace_dir}"
+                    )
+                await self._clone_workspace(str(ws_path), scratch_dir)
+            else:
+                os.makedirs(scratch_dir, exist_ok=True)
+
+            trial_env = environment.model_copy(
+                update={"allowed_filesystem_roots": [ephemeral_dir]}
+            )
+            delta = await self._execute_internal(
                 trial_env,
                 action,
                 trigger_blocked_syscall=trigger_blocked_syscall,
                 request_to_trigger=request_to_trigger,
+                workspace_root=scratch_dir,
             )
-        except Exception:
-            if os.path.exists(scratch_dir):
-                shutil.rmtree(scratch_dir, ignore_errors=True)
+        except BaseException:
+            shutil.rmtree(trial_root, ignore_errors=True)
             raise
 
         return Trial(
@@ -482,6 +710,8 @@ class DryExecClient:
             action=action,
             scratch_dir=scratch_dir,
             workspace_dir=workspace_dir,
+            ephemeral_dir=ephemeral_dir,
+            trial_root=trial_root,
         )
 
     def trial(

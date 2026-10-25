@@ -8,7 +8,7 @@ use dry_exec_core::delta::{
 use dry_exec_core::error::BoundaryExitStatus;
 use dry_exec_core::isolation::{
     execute_isolated_process, execute_isolated_process_with_inspection, MountConfig,
-    ProcessBoundaryConfig, SeccompFilter, SyscallAction,
+    NamespaceFlags, ProcessBoundaryConfig, SeccompFilter, SyscallAction,
 };
 use std::time::Instant;
 
@@ -76,6 +76,7 @@ fn test_setup_failure_returns_without_blocking() {
         mount_config: MountConfig {
             tmpfs_path: std::path::PathBuf::from("/proc/dry_exec_unwritable/tmpfs"),
             mount_sterile_proc: false,
+            writable_paths: Vec::new(),
         },
         ..trap_boundary_config()
     };
@@ -92,6 +93,111 @@ fn test_setup_failure_returns_without_blocking() {
         .recv_timeout(std::time::Duration::from_secs(5))
         .expect("boundary setup failure blocked the control plane instead of returning");
     assert!(outcome.is_err(), "expected a setup error, observed success");
+}
+
+#[test]
+fn test_landlock_denies_writes_outside_ephemeral_root() {
+    // `restrict_root_readonly` intentionally leaves /dev writable. Use a directory there as the
+    // canary: without Landlock the child can write it, so a denied write proves Landlock is
+    // enforcing the boundary.
+    let outside_dir = tempfile::tempdir_in("/dev").expect("Failed to create /dev canary");
+    let denied_new_path = outside_dir.path().join("denied-new.txt");
+    let denied_existing_path = outside_dir.path().join("denied-existing.txt");
+    std::fs::write(&denied_existing_path, b"original").expect("Failed to create canary");
+
+    let temp_dir = tempfile::tempdir().expect("Failed to create temporary directory");
+    let ephemeral = temp_dir.path().join("ephemeral");
+    std::fs::create_dir(&ephemeral).expect("Failed to create ephemeral root");
+    let allowed_path = ephemeral.join("allowed.txt");
+
+    let denied_new_for_child = denied_new_path.clone();
+    let denied_existing_for_child = denied_existing_path.clone();
+    let config = ProcessBoundaryConfig {
+        landlock: true,
+        mount_config: MountConfig {
+            tmpfs_path: ephemeral.clone(),
+            mount_sterile_proc: true,
+            writable_paths: Vec::new(),
+        },
+        ..trap_boundary_config()
+    };
+
+    let (status, _) = execute_isolated_process(&config, move || {
+        let mut code = 0;
+        if std::fs::write(&allowed_path, b"allowed").is_err() {
+            code |= 1;
+        }
+        if std::fs::write(&denied_new_for_child, b"denied").is_ok() {
+            code |= 2;
+        }
+        if std::fs::write(&denied_existing_for_child, b"mutated").is_ok() {
+            code |= 4;
+        }
+        unsafe { libc::_exit(code) }
+    })
+    .expect("Process boundary execution failed");
+
+    assert_eq!(status, BoundaryExitStatus::Exited(0));
+    assert!(
+        !denied_new_path.exists(),
+        "Landlock allowed creating a file outside the ephemeral root"
+    );
+    assert_eq!(
+        std::fs::read(&denied_existing_path).expect("Failed to read canary"),
+        b"original",
+        "Landlock allowed truncating a file outside the ephemeral root"
+    );
+}
+
+#[test]
+fn test_rootless_user_namespace_keeps_landlock_write_boundary() {
+    // Rootless mode cannot remount the host tree read-only. Landlock must remain the write
+    // boundary, and the child must still be able to mount its ephemeral tmpfs.
+    let outside_dir = tempfile::tempdir().expect("Failed to create /tmp canary");
+    let denied_new_path = outside_dir.path().join("rootless-denied.txt");
+    let denied_new_for_child = denied_new_path.clone();
+
+    let temp_dir = tempfile::tempdir().expect("Failed to create temporary directory");
+    let ephemeral = temp_dir.path().join("ephemeral");
+    std::fs::create_dir(&ephemeral).expect("Failed to create ephemeral root");
+    let allowed_path = ephemeral.join("allowed.txt");
+
+    let config = ProcessBoundaryConfig {
+        namespaces: NamespaceFlags::default() | NamespaceFlags::USER,
+        landlock: true,
+        mount_config: MountConfig {
+            tmpfs_path: ephemeral.clone(),
+            mount_sterile_proc: true,
+            writable_paths: Vec::new(),
+        },
+        ..trap_boundary_config()
+    };
+
+    let (status, _) = execute_isolated_process(&config, move || {
+        let mut code = 0;
+        if std::fs::write(&allowed_path, b"allowed").is_err() {
+            code |= 1;
+        }
+        if std::fs::write(&denied_new_for_child, b"denied").is_ok() {
+            code |= 2;
+        }
+        unsafe { libc::_exit(code) }
+    })
+    .expect("Rootless process boundary execution failed");
+
+    assert_eq!(status, BoundaryExitStatus::Exited(0));
+    assert!(
+        !denied_new_path.exists(),
+        "Rootless Landlock boundary allowed a write outside the ephemeral root"
+    );
+
+    // The rootless mount namespace must not leak its tmpfs mount into the host namespace.
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo")
+        .expect("Failed to read parent mount namespace");
+    assert!(
+        !mountinfo.contains(ephemeral.to_str().unwrap()),
+        "Rootless ephemeral tmpfs propagated into the host mount namespace"
+    );
 }
 
 #[test]
@@ -124,6 +230,7 @@ fn test_assertion_b_state_delta_precision() {
         mount_config: MountConfig {
             tmpfs_path: ephemeral_root.clone(),
             mount_sterile_proc: true,
+            writable_paths: Vec::new(),
         },
         ..trap_boundary_config()
     };

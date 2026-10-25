@@ -2,8 +2,9 @@
 
 use crate::delta::network::{bind_loopback_listener, NetworkBoundary, TransparentProxy};
 use crate::error::{BoundaryExitStatus, IsolationError};
+use crate::isolation::landlock::apply_write_containment;
 use crate::isolation::mount::{
-    mount_ephemeral_tmpfs, mount_sterile_proc, restrict_root_readonly,
+    bind_mount_writable, mount_ephemeral_tmpfs, mount_sterile_proc, restrict_root_readonly,
     set_mount_propagation_private, MountConfig,
 };
 use crate::isolation::namespace::{bring_loopback_up, NamespaceFlags};
@@ -125,6 +126,14 @@ pub struct ProcessBoundaryConfig {
     pub mount_config: MountConfig,
     pub seccomp_filter: SeccompFilter,
 
+    /// Apply Landlock write containment after namespace setup. Reads remain unrestricted; writes
+    /// are confined to the ephemeral tmpfs, writable workspace paths, and safe device nodes.
+    pub landlock: bool,
+
+    /// Optional cgroup v2 memory ceiling applied to the isolated execution layer and descendants.
+    /// Requires a delegated cgroup v2 hierarchy with the memory controller enabled.
+    pub cgroup_memory_limit: Option<u64>,
+
     /// Optional deterministic network boundary. When configured, the isolated execution layer
     /// binds the mock listener inside its own network namespace and forwards the descriptor to
     /// the control plane, which serves it: outbound requests from within the boundary reach the
@@ -138,6 +147,8 @@ impl Default for ProcessBoundaryConfig {
             namespaces: NamespaceFlags::default(),
             mount_config: MountConfig::default(),
             seccomp_filter: SeccompFilter::default().with_baseline_whitelist(),
+            landlock: false,
+            cgroup_memory_limit: None,
             network_boundary: None,
         }
     }
@@ -304,6 +315,97 @@ fn decode_wait_status(status: WaitStatus) -> BoundaryExitStatus {
     }
 }
 
+/// Write `uid_map`/`gid_map` so the isolated child owns its user namespace.
+fn configure_user_namespace(pid: i32) -> Result<(), IsolationError> {
+    let base = std::path::PathBuf::from(format!("/proc/{pid}"));
+
+    let setgroups = base.join("setgroups");
+    if setgroups.exists() {
+        std::fs::write(&setgroups, b"deny").map_err(|error| {
+            IsolationError::NamespaceFailure(format!(
+                "Failed to disable setgroups for user namespace: {error}"
+            ))
+        })?;
+    }
+
+    let uid = unsafe { libc::geteuid() };
+    let gid = unsafe { libc::getegid() };
+    std::fs::write(base.join("uid_map"), format!("0 {uid} 1\n")).map_err(|error| {
+        IsolationError::NamespaceFailure(format!("Failed to write uid_map: {error}"))
+    })?;
+    std::fs::write(base.join("gid_map"), format!("0 {gid} 1\n")).map_err(|error| {
+        IsolationError::NamespaceFailure(format!("Failed to write gid_map: {error}"))
+    })?;
+
+    Ok(())
+}
+
+/// Owned cgroup v2 node limiting the isolated execution layer's memory.
+struct CgroupGuard {
+    path: std::path::PathBuf,
+}
+
+impl CgroupGuard {
+    const ROOT: &'static str = "/sys/fs/cgroup";
+
+    fn create(limit_bytes: u64, child_pid: i32) -> Result<Self, IsolationError> {
+        let root = std::path::Path::new(Self::ROOT);
+        if !root.join("cgroup.controllers").exists() {
+            return Err(IsolationError::ProcessFailure(
+                "cgroup v2 is not mounted at /sys/fs/cgroup".to_string(),
+            ));
+        }
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let path = root.join(format!("dry_exec_{child_pid}_{nonce}"));
+        std::fs::create_dir(&path).map_err(|error| {
+            IsolationError::ProcessFailure(format!(
+                "Failed to create cgroup {}: {error}",
+                path.display()
+            ))
+        })?;
+
+        let guard = Self { path };
+        std::fs::write(guard.path.join("memory.max"), limit_bytes.to_string()).map_err(
+            |error| {
+                IsolationError::ProcessFailure(format!(
+                    "Failed to set cgroup memory.max to {limit_bytes}: {error}"
+                ))
+            },
+        )?;
+
+        let swap_max = guard.path.join("memory.swap.max");
+        if swap_max.exists() {
+            std::fs::write(&swap_max, "0").map_err(|error| {
+                IsolationError::ProcessFailure(format!(
+                    "Failed to disable cgroup swap for {}: {error}",
+                    guard.path.display()
+                ))
+            })?;
+        }
+
+        Ok(guard)
+    }
+
+    fn add_pid(&self, child_pid: i32) -> Result<(), IsolationError> {
+        std::fs::write(self.path.join("cgroup.procs"), child_pid.to_string()).map_err(|error| {
+            IsolationError::ProcessFailure(format!(
+                "Failed to move child {child_pid} into cgroup {}: {error}",
+                self.path.display()
+            ))
+        })
+    }
+}
+
+impl Drop for CgroupGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.path);
+    }
+}
+
 /// Clones an ephemeral process into isolated namespaces, applies boundaries, and executes action.
 pub fn execute_isolated_process<F, R>(
     config: &ProcessBoundaryConfig,
@@ -336,6 +438,17 @@ where
     R: Send + 'static,
     I: FnOnce(BoundaryContext) -> T,
 {
+    if config.namespaces.contains(NamespaceFlags::USER) {
+        // A rootless namespace cannot remount the host tree read-only. Landlock is the write
+        // boundary, so refuse to run without it rather than silently degrading.
+        if !config.landlock || !config.namespaces.contains(NamespaceFlags::MOUNT) {
+            return Err(IsolationError::ProcessFailure(
+                "Rootless user-namespace isolation requires the mount namespace and Landlock"
+                    .to_string(),
+            ));
+        }
+    }
+
     // Create synchronization socketpair for parent-child boundary coordination
     let mut fds = [0; 2];
     let res = unsafe {
@@ -391,9 +504,27 @@ where
         );
         let _ = unsafe { sigaction(Signal::SIGSYS, &sa) };
 
+        let rootless = payload.config.namespaces.contains(NamespaceFlags::USER);
+
+        // The parent maps the caller's uid/gid into the new user namespace after clone(2). Block
+        // here until the mapping exists; mount(2) needs namespace-local capabilities.
+        if rootless {
+            let mut map_ack = [0u8; 1];
+            let n = unsafe { libc::read(child_fd, map_ack.as_mut_ptr() as *mut libc::c_void, 1) };
+            if n <= 0 {
+                unsafe { libc::_exit(1) }
+            }
+            // Create the mount namespace after uid/gid mapping. A namespace created in the same
+            // clone(2) as CLONE_NEWUSER is owned by the parent user namespace, which prevents a
+            // rootless child from making inherited mounts private or mounting over them.
+            if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
+                unsafe { libc::_exit(4) }
+            }
+        }
+
         // 1. Mount boundary setup
         if payload.config.namespaces.contains(NamespaceFlags::MOUNT) {
-            if set_mount_propagation_private().is_err() {
+            if !rootless && set_mount_propagation_private().is_err() {
                 unsafe { libc::_exit(4) }
             }
             // The ephemeral root must exist before the host tree is made read-only; mounting the
@@ -401,8 +532,15 @@ where
             if std::fs::create_dir_all(&payload.config.mount_config.tmpfs_path).is_err() {
                 unsafe { libc::_exit(4) }
             }
-            if restrict_root_readonly().is_err() {
-                unsafe { libc::_exit(4) }
+            if !rootless {
+                if restrict_root_readonly().is_err() {
+                    unsafe { libc::_exit(4) }
+                }
+                for writable_path in &payload.config.mount_config.writable_paths {
+                    if bind_mount_writable(writable_path).is_err() {
+                        unsafe { libc::_exit(4) }
+                    }
+                }
             }
             if mount_ephemeral_tmpfs(&payload.config.mount_config.tmpfs_path).is_err() {
                 unsafe { libc::_exit(4) }
@@ -412,7 +550,39 @@ where
             }
         }
 
-        // 2. Notify parent control plane: child ready for baseline reset. When a network boundary
+        // 2. Enforce the write boundary at path resolution time. The mount namespace alone is
+        //    insufficient because a process retaining CAP_SYS_ADMIN can remount host mounts
+        //    writable inside its own namespace.
+        if payload.config.landlock {
+            let mut write_paths: Vec<&std::path::Path> =
+                vec![payload.config.mount_config.tmpfs_path.as_path()];
+            write_paths.extend(
+                payload
+                    .config
+                    .mount_config
+                    .writable_paths
+                    .iter()
+                    .map(std::path::PathBuf::as_path),
+            );
+            for device in [
+                "/dev/null",
+                "/dev/zero",
+                "/dev/full",
+                "/dev/random",
+                "/dev/urandom",
+                "/dev/tty",
+            ] {
+                let path = std::path::Path::new(device);
+                if path.exists() {
+                    write_paths.push(path);
+                }
+            }
+            if apply_write_containment(&write_paths).is_err() {
+                unsafe { libc::_exit(5) }
+            }
+        }
+
+        // 3. Notify parent control plane: child ready for baseline reset. When a network boundary
         //    is configured, the isolated network namespace binds the schema-driven mock listener
         //    and forwards the descriptor, so outbound requests reach the transparent proxy.
         let ready = match payload.config.network_boundary.as_ref() {
@@ -423,24 +593,24 @@ where
             unsafe { libc::_exit(3) }
         }
 
-        // 3. Await parent acknowledgment (baseline clear completion)
+        // 4. Await parent acknowledgment (baseline clear completion)
         let mut ack_byte = [0u8; 1];
         let n = unsafe { libc::read(child_fd, ack_byte.as_mut_ptr() as *mut libc::c_void, 1) };
         if n <= 0 {
             unsafe { libc::_exit(1) }
         }
 
-        // 4. Attach Seccomp-BPF syscall interception boundary
+        // 5. Attach Seccomp-BPF syscall interception boundary
         if let Err(_e) = payload.config.seccomp_filter.attach() {
             unsafe { libc::_exit(2) }
         }
 
-        // 5. Execute isolated state-mutation action
+        // 6. Execute isolated state-mutation action
         if let Some(act) = payload.action.take() {
             let _ = act();
         }
 
-        // 6. Signal completion to parent, then hold the CoW address space open until released
+        // 7. Signal completion to parent, then hold the CoW address space open until released
         let done_byte: [u8; 1] = [BOUNDARY_DONE];
         let _ = unsafe { libc::write(child_fd, done_byte.as_ptr() as *const libc::c_void, 1) };
 
@@ -450,7 +620,11 @@ where
         unsafe { libc::_exit(0) }
     }
 
-    let clone_flags = config.namespaces.to_clone_flags().bits() | libc::SIGCHLD;
+    let mut namespaces = config.namespaces;
+    if namespaces.contains(NamespaceFlags::USER) {
+        namespaces.remove(NamespaceFlags::MOUNT);
+    }
+    let clone_flags = namespaces.to_clone_flags().bits() | libc::SIGCHLD;
 
     let child_pid = unsafe {
         libc::clone(
@@ -478,6 +652,14 @@ where
     // configuration and the child's socket end do not leak across trials; closing the parent's
     // descriptor also makes a premature child exit observable as EOF instead of blocking.
     drop(unsafe { Box::from_raw(payload_ptr) });
+
+    if config.namespaces.contains(NamespaceFlags::USER) {
+        if let Err(error) = configure_user_namespace(child_pid) {
+            terminate_child(pid);
+            return Err(error);
+        }
+        send_control_byte(parent_sock.as_raw_fd(), 1);
+    }
 
     // Coordinate with child across synchronization boundary: the readiness frame carries the
     // isolated network namespace's mock listener descriptor when a network boundary is configured.
@@ -518,6 +700,25 @@ where
             ));
         }
         (None, None) => None,
+    };
+
+    // Apply the cgroup memory ceiling while the child is parked before baseline reset.
+    let _cgroup_guard = match config.cgroup_memory_limit {
+        Some(limit) => {
+            let guard = match CgroupGuard::create(limit, child_pid) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    terminate_child(pid);
+                    return Err(error);
+                }
+            };
+            if let Err(error) = guard.add_pid(child_pid) {
+                terminate_child(pid);
+                return Err(error);
+            }
+            Some(guard)
+        }
+        None => None,
     };
 
     // Reset kernel page-table tracking for child: write "4\n" to /proc/[pid]/clear_refs

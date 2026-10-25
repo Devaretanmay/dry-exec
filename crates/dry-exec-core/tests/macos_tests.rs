@@ -13,13 +13,17 @@ use tempfile::tempdir;
 
 #[test]
 fn test_macos_sbpl_generation() {
-    let config = SeatbeltConfig::default();
+    let config = SeatbeltConfig {
+        loopback_proxy_port: Some(31415),
+        ..SeatbeltConfig::default()
+    };
     let profile = generate_seatbelt_profile(&config);
 
     assert!(profile.contains("(version 1)"));
     assert!(profile.contains("(deny default)"));
     assert!(profile.contains("(allow process-exec (literal \"/bin/echo\"))"));
-    assert!(profile.contains("(allow network-outbound (to ip \"localhost:*\"))"));
+    assert!(profile.contains("(allow network-outbound (to ip \"localhost:31415\"))"));
+    assert!(!profile.contains("localhost:*"));
     assert!(profile.contains("(allow file-write* (subpath \"/private/tmp/dex_ephemeral\"))"));
 }
 

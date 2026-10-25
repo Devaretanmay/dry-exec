@@ -1,5 +1,6 @@
 //! Deterministic state delta engine module.
 
+pub mod clone;
 pub mod fs;
 pub mod memory;
 pub mod network;
@@ -11,6 +12,7 @@ pub mod pagemap;
 #[cfg(target_os = "macos")]
 pub mod macos_fs;
 
+pub use clone::clone_directory;
 pub use fs::{FsSnapshot, InodeRecord};
 #[cfg(target_os = "linux")]
 pub use memory::{clear_soft_dirty_bits, read_process_memory};
@@ -57,6 +59,12 @@ impl DeltaCoordinator {
         Ok(())
     }
 
+    /// Record an empty baseline for an ephemeral root whose durable contents are not visible
+    /// inside the boundary. A fresh tmpfs starts empty even when its host mountpoint is not.
+    pub fn snapshot_empty(&mut self, fs_root: &Path) {
+        self.fs_snapshot = Some(FsSnapshot::empty(fs_root));
+    }
+
     /// Initialize transparent network proxy on loopback interface with schema mock routes.
     ///
     /// The listener is bound in the control plane's network namespace, so it intercepts requests
@@ -85,6 +93,19 @@ impl DeltaCoordinator {
         child_pid: i32,
         memory_region: Option<(&AnonymousMemoryRegion, usize)>,
     ) -> Result<StateDelta, DeltaError> {
+        self.compute_full_delta_at(child_pid, memory_region, None)
+    }
+
+    /// Compute full state delta post-execution against an explicit post-execution filesystem root.
+    ///
+    /// `current_fs_root` is used when the writable workspace is a host-backed directory that the
+    /// boundary bind-mounted read-write, rather than the child's private tmpfs view.
+    pub fn compute_full_delta_at(
+        &self,
+        child_pid: i32,
+        memory_region: Option<(&AnonymousMemoryRegion, usize)>,
+        current_fs_root: Option<&Path>,
+    ) -> Result<StateDelta, DeltaError> {
         let start = Instant::now();
 
         // 1. Compute memory mutations (Linux: soft-dirty pagemap; macOS: empty graceful degradation)
@@ -104,14 +125,18 @@ impl DeltaCoordinator {
 
         // 2. Compute filesystem mutations via snapshot comparison
         let fs_mutations = if let Some(ref snapshot) = self.fs_snapshot {
-            let child_root = Path::new("/proc")
-                .join(child_pid.to_string())
-                .join("root")
-                .join(snapshot.root.strip_prefix("/").unwrap_or(&snapshot.root));
-            if child_root.exists() {
-                snapshot.compute_delta_at(&child_root)?
+            if let Some(root) = current_fs_root {
+                snapshot.compute_delta_at(root)?
             } else {
-                snapshot.compute_delta()?
+                let child_root = Path::new("/proc")
+                    .join(child_pid.to_string())
+                    .join("root")
+                    .join(snapshot.root.strip_prefix("/").unwrap_or(&snapshot.root));
+                if child_root.exists() {
+                    snapshot.compute_delta_at(&child_root)?
+                } else {
+                    snapshot.compute_delta()?
+                }
             }
         } else {
             Vec::new()
